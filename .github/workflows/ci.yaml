@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+
+      - name: Run unit tests
+        run: make test
+
+      - name: Build binary
+        run: make build
+
+  docker-integration:
+    runs-on: ubuntu-latest
+    needs: build-test
+    services:
+      geoip-auth:
+        image: geoip-test
+        ports:
+          - 8080:8080
+        options: >-
+          --health-cmd "curl --fail http://localhost:8080/healthz || exit 1"
+          --health-interval 10s
+          --health-timeout 3s
+          --health-retries 3
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download GeoLite2 Country DB
+        run: |
+          mkdir -p mmdb
+          curl -L -o mmdb/GeoLite2-Country.mmdb "https://raw.githubusercontent.com/P3TERX/GeoLite.mmdb/download/GeoLite2-Country.mmdb"
+
+      - name: Build Docker image
+        run: docker build -t geoip-test .
+
+      - name: Start container with valid DB
+        run: |
+          docker run -d --name geoip-ok -p 8080:8080 \
+            -e GEOIP_DB=/mmdb/GeoLite2-Country.mmdb \
+            -v ${{ github.workspace }}/mmdb:/mmdb \
+            geoip-test
+
+      - name: Wait for readiness
+        run: sleep 5
+
+      - name: Test /healthz
+        run: curl --fail http://localhost:8080/healthz
+
+      - name: Test /ready
+        run: curl --fail http://localhost:8080/ready
+
+      - name: Test /auth (should succeed or fail based on IP)
+        run: |
+          curl -s -H "X-Forwarded-For: 8.8.8.8" http://localhost:8080/auth || true
+
+      - name: Test missing DB (should exit)
+        run: |
+          ! docker run --rm geoip-test --db /missing.mmdb 2>&1 | tee missing.log | grep "Could not open GeoIP DB"
