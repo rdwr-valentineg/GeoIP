@@ -36,8 +36,8 @@ jobs:
           push: true
           platforms: linux/amd64,linux/arm64
           tags: |
-            ${{ secrets.DOCKERHUB_UNAME }}/geoip-auth:${{ env.SHA_TAG }}
-            ${{ secrets.DOCKERHUB_UNAME }}/geoip-auth:latest
+            ${{ secrets.DOCKER_UNAME }}/geoip-auth:${{ env.SHA_TAG }}
+            ${{ secrets.DOCKER_UNAME }}/geoip-auth:latest
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
