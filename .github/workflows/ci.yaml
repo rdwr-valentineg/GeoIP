@@ -25,16 +25,6 @@ jobs:
   docker-integration:
     runs-on: ubuntu-latest
     needs: build-test
-    services:
-      geoip-auth:
-        image: geoip-test
-        ports:
-          - 8080:8080
-        options: >-
-          --health-cmd "curl --fail http://localhost:8080/healthz || exit 1"
-          --health-interval 10s
-          --health-timeout 3s
-          --health-retries 3
     steps:
       - uses: actions/checkout@v4
 
@@ -49,7 +39,6 @@ jobs:
       - name: Start container with valid DB
         run: |
           docker run -d --name geoip-ok -p 8080:8080 \
-            -e GEOIP_DB=/mmdb/GeoLite2-Country.mmdb \
             -v ${{ github.workspace }}/mmdb:/mmdb \
             geoip-test
 
