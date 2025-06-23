@@ -40,7 +40,7 @@ jobs:
         run: |
           docker run -d --name geoip-ok -p 8080:8080 \
             -v ${{ github.workspace }}/mmdb:/mmdb \
-            geoip-test
+            geoip-test --exclude 192.168.0.0/24
 
       - name: Wait for readiness
         run: sleep 5
@@ -51,10 +51,25 @@ jobs:
       - name: Test /ready
         run: curl --fail http://localhost:8080/ready
 
-      - name: Test /auth (should succeed or fail based on IP)
+      - name: Test /auth (should succeed)
         run: |
-          curl -s -H "X-Forwarded-For: 8.8.8.8" http://localhost:8080/auth || true
+          curl --fail -H "X-Forwarded-For: 192.168.0.1" http://localhost:8080/auth 
+      
+      - name: Test /auth (should fail)
+        run: |
+          ! curl --fail -H "X-Forwarded-For: 213.176.123.5" http://localhost:8080/auth 
 
-      - name: Test missing DB (should exit)
+      - name: Test missing DB (should fail gracefully)
         run: |
-          ! docker run --rm geoip-test --db /missing.mmdb 2>&1 | tee missing.log | grep "Could not open GeoIP DB"
+          set +e
+          output=$(docker run --rm geoip-test --db /missing.mmdb 2>&1)
+          status=$?
+          echo "$output"
+          echo "$output" | grep "Could not open GeoIP DB"
+          if [ $status -eq 0 ]; then
+            echo "Expected failure but command succeeded"
+            exit 1
+          fi
+
+      - name: Stop and remove container
+        run: docker rm -f geoip-test
