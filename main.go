@@ -2,19 +2,17 @@ package main
 
 import (
 	"encoding/json"
-	"flag"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/oschwald/geoip2-golang"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/rdwr-valentineg/GeoIP/internal/config"
+	"github.com/rdwr-valentineg/GeoIP/internal/metrics"
+	"github.com/rs/zerolog/log"
 )
 
 type (
@@ -31,49 +29,9 @@ var (
 	geoCache = make(map[string]cacheEntry)
 	cacheMux = sync.RWMutex{}
 
-	excludeSubnets []*net.IPNet
+	excludeSubnets   []*net.IPNet
 	allowedCountries = map[string]bool{}
-
-	logLevel         = "info"
-	cachePurgePeriod time.Duration
-	requestsTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "geoip_auth_requests_total",
-			Help: "Total number of auth requests",
-		},
-		[]string{"country", "allowed"},
-	)
-	cacheHits = prometheus.NewCounter(
-		prometheus.CounterOpts{
-			Name: "geoip_auth_cache_hits_total",
-			Help: "Total number of cache hits",
-		},
-	)
-	cacheEvictions = prometheus.NewCounter(
-		prometheus.CounterOpts{
-			Name: "geoip_auth_cache_evictions_total",
-			Help: "Total number of cache purges",
-		},
-	)
 )
-
-func initMetrics() {
-	prometheus.MustRegister(requestsTotal)
-	prometheus.MustRegister(cacheHits)
-	prometheus.MustRegister(cacheEvictions)
-}
-
-func logInfo(format string, args ...interface{}) {
-	if logLevel == "info" || logLevel == "debug" {
-		log.Printf("[INFO] "+format, args...)
-	}
-}
-
-func logError(format string, args ...interface{}) {
-	if logLevel != "none" {
-		log.Printf("[ERROR] "+format, args...)
-	}
-}
 
 func isExcluded(ip net.IP, excluded []*net.IPNet) bool {
 	for _, subnet := range excluded {
@@ -97,8 +55,8 @@ func clearCachePeriodically(interval time.Duration) {
 			evicted := len(geoCache)
 			geoCache = make(map[string]cacheEntry)
 			cacheMux.Unlock()
-			cacheEvictions.Add(float64(evicted))
-			logInfo("Cache cleared, evicted %d entries", evicted)
+			metrics.CacheEvictions.Add(float64(evicted))
+			log.Info().Int("evicted entries", evicted).Msg("Cache cleared")
 		}
 	}()
 }
@@ -112,14 +70,14 @@ func handleRequest(w http.ResponseWriter, r *http.Request, db *geoip2.Reader, ip
 	ip := net.ParseIP(ipStr)
 	if ip == nil {
 		http.Error(w, "Forbidden (invalid IP)", http.StatusForbidden)
-		logError("Invalid IP: %v", ipStr)
+		log.Debug().Str("ip", ipStr).Msg("Excluded IP allowed")
 		return
 	}
 
 	if isExcluded(ip, excluded) {
-		logInfo("Excluded IP allowed: %s", ipStr)
+		log.Debug().Str("ip", ipStr).Msg("Excluded IP allowed")
 		respondAllowed(w, "LAN")
-		requestsTotal.WithLabelValues("LAN", "true").Inc()
+		metrics.RequestsTotal.WithLabelValues("LAN", "true").Inc()
 		return
 	}
 
@@ -128,22 +86,25 @@ func handleRequest(w http.ResponseWriter, r *http.Request, db *geoip2.Reader, ip
 	cacheMux.RUnlock()
 
 	if found {
-		logInfo("Cache hit for IP: %s", ipStr)
-		cacheHits.Inc()
+		log.Debug().
+			Str("ip", ipStr).
+			Str("country", entry.country).
+			Msg("Cache hit for")
+		metrics.CacheHits.Inc()
 		if entry.allowed {
 			respondAllowed(w, entry.country)
-			requestsTotal.WithLabelValues(entry.country, "true").Inc()
+			metrics.RequestsTotal.WithLabelValues(entry.country, "true").Inc()
 			return
 		}
 		http.Error(w, "Forbidden", http.StatusForbidden)
-		requestsTotal.WithLabelValues(entry.country, "false").Inc()
+		metrics.RequestsTotal.WithLabelValues(entry.country, "false").Inc()
 		return
 	}
 
 	country, err := db.Country(ip)
 	if err != nil {
 		http.Error(w, "Forbidden", http.StatusForbidden)
-		logError("GeoIP lookup failed for IP %s: %v", ipStr, err)
+		log.Info().Str("ip", ipStr).Err(err).Msg("GeoIP lookup failed")
 		return
 	}
 
@@ -157,13 +118,13 @@ func handleRequest(w http.ResponseWriter, r *http.Request, db *geoip2.Reader, ip
 	}
 	cacheMux.Unlock()
 
-	requestsTotal.WithLabelValues(isoCode, fmt.Sprintf("%v", allowed)).Inc()
+	metrics.RequestsTotal.WithLabelValues(isoCode, fmt.Sprintf("%v", allowed)).Inc()
 
 	if allowed {
-		logInfo("Allowed country %s for IP %s", isoCode, ipStr)
+		log.Debug().Str("ip", ipStr).Str("country", isoCode).Msg("Allowed")
 		respondAllowed(w, isoCode)
 	} else {
-		logInfo("Denied country %s for IP %s", isoCode, ipStr)
+		log.Debug().Str("ip", ipStr).Str("country", isoCode).Msg("Denied")
 		w.Header().Set("X-Country", isoCode)
 		w.WriteHeader(http.StatusForbidden)
 		json.NewEncoder(w).Encode(AuthResponse{Message: "Access denied"})
@@ -171,42 +132,43 @@ func handleRequest(w http.ResponseWriter, r *http.Request, db *geoip2.Reader, ip
 }
 
 func main() {
-	var (
-		dbPath = flag.String("db", getEnv("GEOIP_DB", "/mmdb/GeoLite2-Country.mmdb"), "Path to MaxMind GeoIP2 DB")
-		port = flag.String("port", getEnv("PORT", "8080"), "Port to listen on")
-		excludeCIDR = flag.String("exclude", getEnv("EXCLUDE_CIDRS", "192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,127.0.0.0/8,::1/128"), "Comma-separated CIDRs to exclude")
-		allowedCountryList = flag.String("allow", getEnv("ALLOW_COUNTRIES", "US"), "Comma-separated list of ISO country codes to allow")
-		ipHeader = flag.String("ip-header", getEnv("IP_HEADER", "X-Forwarded-For"), "Header to extract real IP")
-		logLevelFlag = flag.String("log-level", getEnv("LOG_LEVEL", "info"), "Log level (none, error, info, debug)")
-		purgeInterval = flag.Duration("purge-interval", mustParseDuration(getEnv("CACHE_PURGE_INTERVAL", "2m")), "Interval for clearing the cache")
-	)
-	flag.Parse()
-	logLevel = *logLevelFlag
-	cachePurgePeriod = *purgeInterval
+	cfg, err := config.InitConfig()
+	if err != nil {
+		log.Fatal().Err(err).Msg("Invalid configuration")
+	}
 
-	for _, cidr := range strings.Split(*excludeCIDR, ",") {
-		cidr = strings.TrimSpace(cidr)
-		_, ipnet, err := net.ParseCIDR(cidr)
+	InitLogger(cfg.LogLevelFlag)
+
+	for cidr := range strings.SplitSeq(cfg.ExcludeCIDR, ",") {
+		_, ipnet, err := net.ParseCIDR(strings.TrimSpace(cidr))
 		if err == nil {
 			excludeSubnets = append(excludeSubnets, ipnet)
 		}
 	}
 
-	for _, c := range strings.Split(*allowedCountryList, ",") {
+	for c := range strings.SplitSeq(cfg.AllowedCountryList, ",") {
 		allowedCountries[strings.ToUpper(strings.TrimSpace(c))] = true
 	}
 
-	db, err := geoip2.Open(*dbPath)
+	db, err := geoip2.Open(cfg.DbPath)
 	if err != nil {
-		log.Fatalf("[FATAL] Could not open GeoIP DB: %v", err)
+		log.Fatal().Err(err).Msg("Could not open GeoIP DB")
 	}
 	defer db.Close()
 
-	initMetrics()
-	clearCachePeriodically(cachePurgePeriod)
+	addHandlers(db, cfg.IpHeader, excludeSubnets)
+	metrics.InitMetrics()
+	clearCachePeriodically(cfg.CachePurgePeriod)
 
+	log.Info().Uint("port", cfg.Port).Msg("GeoIP server listening")
+	if err := http.ListenAndServe(fmt.Sprintf(":%d", cfg.Port), nil); err != nil {
+		log.Fatal().Err(err).Msg("Server failed")
+	}
+}
+
+func addHandlers(db *geoip2.Reader, ipHeader string, excludeSubnets []*net.IPNet) {
 	http.HandleFunc("/auth", func(w http.ResponseWriter, r *http.Request) {
-		handleRequest(w, r, db, *ipHeader, excludeSubnets)
+		handleRequest(w, r, db, ipHeader, excludeSubnets)
 	})
 
 	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -218,26 +180,4 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ready"))
 	})
-
-	http.Handle("/metrics", promhttp.Handler())
-
-	logInfo("GeoIP ForwardAuth server listening on port %s", *port)
-	if err := http.ListenAndServe(":"+*port, nil); err != nil {
-		log.Fatalf("[FATAL] Server failed: %v", err)
-	}
-}
-
-func getEnv(key, fallback string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return fallback
-}
-
-func mustParseDuration(s string) time.Duration {
-	d, err := time.ParseDuration(s)
-	if err != nil {
-		log.Fatalf("[FATAL] Invalid duration: %v", err)
-	}
-	return d
 }
