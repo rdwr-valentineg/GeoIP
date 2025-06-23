@@ -18,8 +18,8 @@ jobs:
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          username: ${{ secrets.DOCKER_UNAME }}
+          password: ${{ secrets.DOCKER_TOKEN }}
 
       - name: Extract short SHA and version tag
         id: vars
@@ -36,8 +36,8 @@ jobs:
           push: true
           platforms: linux/amd64,linux/arm64
           tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/geoip-auth:${{ env.SHA_TAG }}
-            ${{ secrets.DOCKERHUB_USERNAME }}/geoip-auth:latest
+            ${{ secrets.DOCKERHUB_UNAME }}/geoip-auth:${{ env.SHA_TAG }}
+            ${{ secrets.DOCKERHUB_UNAME }}/geoip-auth:latest
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
