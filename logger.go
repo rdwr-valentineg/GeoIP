@@ -1,12 +1,13 @@
 package main
 
 import (
+	"github.com/rdwr-valentineg/GeoIP/internal/config"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
 
-func InitLogger(logLevel string) {
-	switch logLevel {
+func InitLogger() {
+	switch config.Config.LogLevelFlag {
 	case "none":
 		log.Logger = log.Output(zerolog.Nop())
 	case "error":
@@ -16,6 +17,6 @@ func InitLogger(logLevel string) {
 	case "debug":
 		log.Logger = log.Level(zerolog.DebugLevel)
 	default:
-		log.Fatal().Msgf("Unknown log level: %s", logLevel)
+		log.Fatal().Msgf("Unknown log level: %s", config.Config.LogLevelFlag)
 	}
 }

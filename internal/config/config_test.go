@@ -11,11 +11,11 @@ import (
 
 func TestValidate(t *testing.T) {
 	tests := map[string]struct {
-		config  *Config
+		config  *config
 		wantErr string
 	}{
 		"valid config": {
-			config: &Config{
+			config: &config{
 				DbPath:           "test.db",
 				Port:             8080,
 				IpHeader:         "some-header",
@@ -23,15 +23,15 @@ func TestValidate(t *testing.T) {
 			},
 		},
 		"empty db path": {
-			config: &Config{
+			config: &config{
 				Port:             8080,
 				IpHeader:         "some-header",
 				CachePurgePeriod: 10,
 			},
-			wantErr: "database path cannot be empty",
+			wantErr: "both database path and Maxmind license key cannot be empty",
 		},
 		"invalid port": {
-			config: &Config{
+			config: &config{
 				DbPath:           "test.db",
 				Port:             65537, // Invalid port (greater than 65536)
 				IpHeader:         "some-header",
@@ -40,7 +40,7 @@ func TestValidate(t *testing.T) {
 			wantErr: "invalid port value, must be between 1 and 65536",
 		},
 		"missing port": {
-			config: &Config{
+			config: &config{
 				DbPath:           "test.db",
 				IpHeader:         "some-header",
 				CachePurgePeriod: 10,
@@ -48,7 +48,7 @@ func TestValidate(t *testing.T) {
 			wantErr: "invalid port value, must be between 1 and 65536",
 		},
 		"missing cache purge period": {
-			config: &Config{
+			config: &config{
 				DbPath:   "test.db",
 				Port:     8080,
 				IpHeader: "some-header",
@@ -83,12 +83,12 @@ func TestInitConfig(t *testing.T) {
 		name      string
 		args      []string
 		wantErr   bool
-		wantCheck func(*Config) error
+		wantCheck func(*config) error
 	}{
 		"default values": {
 			args:    []string{"cmd"},
 			wantErr: false,
-			wantCheck: func(cfg *Config) error {
+			wantCheck: func(cfg *config) error {
 				if cfg.DbPath != "/mmdb/GeoLite2-Country.mmdb" {
 					return errors.New("unexpected DbPath")
 				}
@@ -116,7 +116,7 @@ func TestInitConfig(t *testing.T) {
 				"-purge-interval=5m",
 			},
 			wantErr: false,
-			wantCheck: func(cfg *Config) error {
+			wantCheck: func(cfg *config) error {
 				if cfg.DbPath != "test.db" {
 					return errors.New("unexpected DbPath")
 				}
@@ -163,7 +163,8 @@ func TestInitConfig(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			resetFlags()
 			os.Args = tc.args
-			cfg, err := InitConfig()
+			Config = nil // Reset global config before each test
+			err := InitConfig()
 			if tc.wantErr {
 				if err == nil {
 					t.Errorf("InitConfig() expected error, got nil")
@@ -173,7 +174,7 @@ func TestInitConfig(t *testing.T) {
 					t.Errorf("InitConfig() unexpected error: %v", err)
 				}
 				if tc.wantCheck != nil {
-					if checkErr := tc.wantCheck(cfg); checkErr != nil {
+					if checkErr := tc.wantCheck(Config); checkErr != nil {
 						t.Errorf("Config check failed: %v", checkErr)
 					}
 				}
