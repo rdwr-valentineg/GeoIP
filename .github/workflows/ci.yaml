@@ -2,7 +2,6 @@ name: CI
 
 on:
   push:
-    branches: [main]
   pull_request:
 
 jobs:
@@ -40,7 +39,7 @@ jobs:
         run: |
           docker run -d --name geoip-ok -p 8080:8080 \
             -v ${{ github.workspace }}/mmdb:/mmdb \
-            geoip-test --exclude 192.168.0.0/24
+            geoip-test --exclude 192.168.0.0/24 --db /mmdb/GeoLite2-Country.mmdb --log-level debug
 
       - name: Wait for readiness
         run: sleep 5
@@ -58,6 +57,23 @@ jobs:
       - name: Test /auth (should fail)
         run: |
           ! curl --fail -H "X-Forwarded-For: 213.176.123.5" http://localhost:8080/auth 
+
+      - name: Dump container logs on failure
+        if: failure()
+        run: |
+          echo "===== geoip-test logs ====="
+          docker logs geoip-ok || true
+
+      - name: Save container logs to file
+        if: failure()
+        run: docker logs geoip-ok > geoip.log || true
+      
+      - name: Upload container logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: geoip-ok-log
+          path: geoip.log
 
       - name: Test missing DB (should fail gracefully)
         run: |

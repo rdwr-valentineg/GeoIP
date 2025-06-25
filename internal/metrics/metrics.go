@@ -1,11 +1,9 @@
 package metrics
 
 import (
-	"net/http"
 	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 var (
@@ -45,6 +43,4 @@ func registerMetrics() {
 	prometheus.MustRegister(RequestsTotal)
 	prometheus.MustRegister(CacheHits)
 	prometheus.MustRegister(CacheEvictions)
-
-	http.Handle("/metrics", promhttp.Handler())
 }

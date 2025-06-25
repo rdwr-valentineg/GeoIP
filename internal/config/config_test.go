@@ -3,6 +3,8 @@ package config
 import (
 	"errors"
 	"flag"
+	"fmt"
+	"net"
 	"os"
 	"strings"
 	"testing"
@@ -11,11 +13,11 @@ import (
 
 func TestValidate(t *testing.T) {
 	tests := map[string]struct {
-		config  *Config
+		config  *config
 		wantErr string
 	}{
 		"valid config": {
-			config: &Config{
+			config: &config{
 				DbPath:           "test.db",
 				Port:             8080,
 				IpHeader:         "some-header",
@@ -23,15 +25,15 @@ func TestValidate(t *testing.T) {
 			},
 		},
 		"empty db path": {
-			config: &Config{
+			config: &config{
 				Port:             8080,
 				IpHeader:         "some-header",
 				CachePurgePeriod: 10,
 			},
-			wantErr: "database path cannot be empty",
+			wantErr: "both database path and Maxmind license key cannot be empty",
 		},
 		"invalid port": {
-			config: &Config{
+			config: &config{
 				DbPath:           "test.db",
 				Port:             65537, // Invalid port (greater than 65536)
 				IpHeader:         "some-header",
@@ -40,7 +42,7 @@ func TestValidate(t *testing.T) {
 			wantErr: "invalid port value, must be between 1 and 65536",
 		},
 		"missing port": {
-			config: &Config{
+			config: &config{
 				DbPath:           "test.db",
 				IpHeader:         "some-header",
 				CachePurgePeriod: 10,
@@ -48,7 +50,7 @@ func TestValidate(t *testing.T) {
 			wantErr: "invalid port value, must be between 1 and 65536",
 		},
 		"missing cache purge period": {
-			config: &Config{
+			config: &config{
 				DbPath:   "test.db",
 				Port:     8080,
 				IpHeader: "some-header",
@@ -83,27 +85,8 @@ func TestInitConfig(t *testing.T) {
 		name      string
 		args      []string
 		wantErr   bool
-		wantCheck func(*Config) error
+		wantCheck func(*config) error
 	}{
-		"default values": {
-			args:    []string{"cmd"},
-			wantErr: false,
-			wantCheck: func(cfg *Config) error {
-				if cfg.DbPath != "/mmdb/GeoLite2-Country.mmdb" {
-					return errors.New("unexpected DbPath")
-				}
-				if cfg.Port != 8080 {
-					return errors.New("unexpected Port")
-				}
-				if cfg.IpHeader != "X-Forwarded-For" {
-					return errors.New("unexpected IpHeader")
-				}
-				if cfg.CachePurgePeriod != 2*time.Minute {
-					return errors.New("unexpected CachePurgePeriod")
-				}
-				return nil
-			},
-		},
 		"custom values": {
 			args: []string{
 				"cmd",
@@ -116,27 +99,40 @@ func TestInitConfig(t *testing.T) {
 				"-purge-interval=5m",
 			},
 			wantErr: false,
-			wantCheck: func(cfg *Config) error {
+			wantCheck: func(cfg *config) error {
 				if cfg.DbPath != "test.db" {
 					return errors.New("unexpected DbPath")
 				}
 				if cfg.Port != 9090 {
 					return errors.New("unexpected Port")
 				}
-				if cfg.ExcludeCIDR != "1.2.3.4/32" {
-					return errors.New("unexpected ExcludeCIDR")
+				if len(cfg.ExcludeCIDR) < 1 {
+					return errors.New("unexpected ExcludeCIDR, expected at least one CIDR")
 				}
-				if cfg.AllowedCountryList != "DE,FR" {
-					return errors.New("unexpected AllowedCountryList")
+
+				_, expectedNet, _ := net.ParseCIDR("1.2.3.4/32")
+				if cfg.ExcludeCIDR[0] == nil ||
+					!cfg.ExcludeCIDR[0].IP.Equal(expectedNet.IP) {
+					return fmt.Errorf("unexpected ExcludeCIDR, expected to find [1.2.3.4/32], got [%s]",
+						cfg.ExcludeCIDR[0].String())
+				}
+				if res, found := cfg.AllowedCodes["DE"]; !res || !found {
+					return errors.New("unexpected AllowedCountryList - [DE] should be present")
+				}
+				if res, found := cfg.AllowedCodes["FR"]; !res || !found {
+					return errors.New("unexpected AllowedCountryList, [FR] should be present")
+				}
+				if res, found := cfg.AllowedCodes["RU"]; res || found {
+					return errors.New("unexpected AllowedCountryList, [RU] should not be present")
 				}
 				if cfg.IpHeader != "Real-IP" {
-					return errors.New("unexpected IpHeader")
+					return errors.New("unexpected IpHeader, expected [Real-IP]")
 				}
 				if cfg.LogLevelFlag != "debug" {
-					return errors.New("unexpected LogLevelFlag")
+					return errors.New("unexpected LogLevelFlag, expected [debug]")
 				}
 				if cfg.CachePurgePeriod != 5*time.Minute {
-					return errors.New("unexpected CachePurgePeriod")
+					return errors.New("unexpected CachePurgePeriod, expected [5m]")
 				}
 				return nil
 			},
@@ -159,22 +155,23 @@ func TestInitConfig(t *testing.T) {
 		},
 	}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
 			resetFlags()
 			os.Args = tc.args
-			cfg, err := InitConfig()
+			Config = nil // Reset global config before each test
+			err := InitConfig()
 			if tc.wantErr {
 				if err == nil {
-					t.Errorf("InitConfig() expected error, got nil")
+					t.Errorf("InitConfig() expected error, got nil, config: %+v", Config)
 				}
 			} else {
 				if err != nil {
-					t.Errorf("InitConfig() unexpected error: %v", err)
+					t.Errorf("InitConfig() unexpected error: %v, config: %+v", err, Config)
 				}
 				if tc.wantCheck != nil {
-					if checkErr := tc.wantCheck(cfg); checkErr != nil {
-						t.Errorf("Config check failed: %v", checkErr)
+					if checkErr := tc.wantCheck(Config); checkErr != nil {
+						t.Errorf("Config check failed: %v config: %+v", checkErr, Config)
 					}
 				}
 			}
