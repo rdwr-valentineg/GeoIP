@@ -76,12 +76,13 @@ func (r *RemoteFetcher) periodicFetch() {
 	ticker := time.NewTicker(r.Interval)
 	defer ticker.Stop()
 
-	_ = r.fetch() // Initial fetch
-
+	if err := r.fetch(); err != nil {
+		log.Info().Err(err).Msg("fetch error!")
+	}
 	for {
 		select {
 		case <-ticker.C:
-			_ = r.fetch()
+			r.fetch()
 		case <-r.done:
 			return
 		}
@@ -92,7 +93,6 @@ func (r *RemoteFetcher) fetch() error {
 	url := fmt.Sprintf("%s?edition_id=GeoLite2-Country&license_key=%s&suffix=mmdb", maxmindBaseURL, r.LicenseKey)
 	resp, err := r.Client.Get(url)
 	if err != nil {
-		log.Info().Err(err).Msg("fetch error")
 		return err
 	}
 	defer resp.Body.Close()
@@ -136,7 +136,9 @@ func (r *RemoteFetcher) fetch() error {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 	if r.reader != nil {
-		_ = r.reader.Close()
+		if err := r.reader.Close(); err != nil {
+			log.Error().Err(err).Msg("failed to close previous reader")
+		}
 	}
 	r.reader = reader
 	r.ready = true
