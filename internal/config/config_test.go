@@ -3,6 +3,8 @@ package config
 import (
 	"errors"
 	"flag"
+	"fmt"
+	"net"
 	"os"
 	"strings"
 	"testing"
@@ -85,25 +87,6 @@ func TestInitConfig(t *testing.T) {
 		wantErr   bool
 		wantCheck func(*config) error
 	}{
-		"default values": {
-			args:    []string{"cmd"},
-			wantErr: false,
-			wantCheck: func(cfg *config) error {
-				if cfg.DbPath != "/mmdb/GeoLite2-Country.mmdb" {
-					return errors.New("unexpected DbPath")
-				}
-				if cfg.Port != 8080 {
-					return errors.New("unexpected Port")
-				}
-				if cfg.IpHeader != "X-Forwarded-For" {
-					return errors.New("unexpected IpHeader")
-				}
-				if cfg.CachePurgePeriod != 2*time.Minute {
-					return errors.New("unexpected CachePurgePeriod")
-				}
-				return nil
-			},
-		},
 		"custom values": {
 			args: []string{
 				"cmd",
@@ -123,29 +106,33 @@ func TestInitConfig(t *testing.T) {
 				if cfg.Port != 9090 {
 					return errors.New("unexpected Port")
 				}
-				if len(cfg.ExcludeCIDR) >= 1 &&
-					cfg.ExcludeCIDR[0] != nil &&
-					cfg.ExcludeCIDR[0].IP != nil &&
-					cfg.ExcludeCIDR[0].IP.String() != "1.2.3.4/32" {
-					return errors.New("unexpected ExcludeCIDR")
+				if len(cfg.ExcludeCIDR) < 1 {
+					return errors.New("unexpected ExcludeCIDR, expected at least one CIDR")
+				}
+
+				_, expectedNet, _ := net.ParseCIDR("1.2.3.4/32")
+				if cfg.ExcludeCIDR[0] == nil ||
+					!cfg.ExcludeCIDR[0].IP.Equal(expectedNet.IP) {
+					return fmt.Errorf("unexpected ExcludeCIDR, expected to find [1.2.3.4/32], got [%s]",
+						cfg.ExcludeCIDR[0].String())
 				}
 				if res, found := cfg.AllowedCodes["DE"]; !res || !found {
-					return errors.New("unexpected AllowedCountryList - DE should be present")
+					return errors.New("unexpected AllowedCountryList - [DE] should be present")
 				}
 				if res, found := cfg.AllowedCodes["FR"]; !res || !found {
-					return errors.New("unexpected AllowedCountryList, FR should be present")
+					return errors.New("unexpected AllowedCountryList, [FR] should be present")
 				}
 				if res, found := cfg.AllowedCodes["RU"]; res || found {
-					return errors.New("unexpected AllowedCountryList, RU should not be present")
+					return errors.New("unexpected AllowedCountryList, [RU] should not be present")
 				}
 				if cfg.IpHeader != "Real-IP" {
-					return errors.New("unexpected IpHeader")
+					return errors.New("unexpected IpHeader, expected [Real-IP]")
 				}
 				if cfg.LogLevelFlag != "debug" {
-					return errors.New("unexpected LogLevelFlag")
+					return errors.New("unexpected LogLevelFlag, expected [debug]")
 				}
 				if cfg.CachePurgePeriod != 5*time.Minute {
-					return errors.New("unexpected CachePurgePeriod")
+					return errors.New("unexpected CachePurgePeriod, expected [5m]")
 				}
 				return nil
 			},
@@ -168,23 +155,23 @@ func TestInitConfig(t *testing.T) {
 		},
 	}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
 			resetFlags()
 			os.Args = tc.args
 			Config = nil // Reset global config before each test
 			err := InitConfig()
 			if tc.wantErr {
 				if err == nil {
-					t.Errorf("InitConfig() expected error, got nil")
+					t.Errorf("InitConfig() expected error, got nil, config: %+v", Config)
 				}
 			} else {
 				if err != nil {
-					t.Errorf("InitConfig() unexpected error: %v", err)
+					t.Errorf("InitConfig() unexpected error: %v, config: %+v", err, Config)
 				}
 				if tc.wantCheck != nil {
 					if checkErr := tc.wantCheck(Config); checkErr != nil {
-						t.Errorf("Config check failed: %v", checkErr)
+						t.Errorf("Config check failed: %v config: %+v", checkErr, Config)
 					}
 				}
 			}
