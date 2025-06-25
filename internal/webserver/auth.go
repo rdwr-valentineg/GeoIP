@@ -5,11 +5,17 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/rdwr-valentineg/GeoIP/internal/config"
+	"github.com/rdwr-valentineg/GeoIP/internal/db"
 	"github.com/rdwr-valentineg/GeoIP/internal/metrics"
 	"github.com/rs/zerolog/log"
 )
 
 type (
+	AuthHandler struct {
+		Db db.GeoIPSource
+	}
+
 	geoRecord struct {
 		Country struct {
 			ISOCode string `maxminddb:"iso_code"`
@@ -26,13 +32,21 @@ var (
 	cacheMux = sync.RWMutex{}
 )
 
-func (srv *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if !srv.Db.IsReady() {
+func NewAuthHandler(db db.GeoIPSource) *AuthHandler {
+	return &AuthHandler{
+		Db: db,
+	}
+}
+
+func (ah *AuthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	log.Debug().Bool("ready", ah.Db.IsReady()).Msg("new auth request")
+	if !ah.Db.IsReady() {
 		http.Error(w, "GeoIP DB not ready", http.StatusServiceUnavailable)
 		return
 	}
 
 	ip := getIPFromRequest(r)
+	log.Debug().Str("ip", ip.String()).Msg("auth request from")
 	if ip == nil {
 		http.Error(w, "Unable to determine IP", http.StatusBadRequest)
 		return
@@ -52,7 +66,7 @@ func (srv *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if isExcluded(ip, srv.AllowedCidrs) {
+	if isExcluded(ip, config.Config.ExcludeCIDR) {
 		log.Debug().Str("ip", ip.String()).Msg("Excluded IP allowed")
 		respondAllowed(w, "LAN")
 		metrics.RequestsTotal.WithLabelValues("LAN", "true").Inc()
@@ -60,14 +74,14 @@ func (srv *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var record geoRecord
-	err := srv.Db.GetReader().Lookup(ip, &record)
+	err := ah.Db.GetReader().Lookup(ip, &record)
 	if err != nil {
 		http.Error(w, "GeoIP lookup failed", http.StatusInternalServerError)
 		return
 	}
 
 	isoCode := strings.ToUpper(record.Country.ISOCode)
-	allowed := srv.AllowedCodes[isoCode]
+	allowed := config.Config.AllowedCodes[isoCode]
 
 	cacheMux.Lock()
 	geoCache[ip.String()] = cacheEntry{

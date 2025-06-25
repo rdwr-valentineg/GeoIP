@@ -3,19 +3,22 @@ package config
 import (
 	"errors"
 	"flag"
+	"net"
+	"strings"
 	"time"
 )
 
 type config struct {
 	DbPath               string
 	Port                 uint
-	ExcludeCIDR          string
-	AllowedCountryList   string
 	IpHeader             string
 	LogLevelFlag         string
 	MaxMindLicenseKey    string
 	MaxMindFetchInterval time.Duration
 	CachePurgePeriod     time.Duration
+	AllowedCodes         map[string]bool // e.g., {"US": true}
+	ExcludeCIDR          []*net.IPNet    // e.g., {"10.0.0.0/8", "192.168.0.0/16"}
+
 }
 
 var Config *config
@@ -25,23 +28,35 @@ func InitConfig() error {
 		return nil // Already initialized
 	}
 
-	dbPath := flag.String("db", "/mmdb/GeoLite2-Country.mmdb", "Path to MaxMind GeoIP2 DB")
 	port := flag.Uint("port", 8080, "Port to listen on")
 	excludeCIDR := flag.String("exclude", "192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,127.0.0.0/8,::1/128", "Comma-separated CIDRs to exclude")
 	allowedCountryList := flag.String("allow", "US", "Comma-separated list of ISO country codes to allow")
 	ipHeader := flag.String("ip-header", "X-Forwarded-For", "Header to extract real IP")
 	logLevelFlag := flag.String("log-level", "info", "Log level (none, error, info, debug)")
+	dbPath := flag.String("db", "", "Path to MaxMind GeoIP2 DB")
 	maxMindLicenseKey := flag.String("maxmind-license-key", "", "MaxMind license key for GeoIP2 DB updates")
 	maxMindFetchInterval := flag.Duration("maxmind-fetch-interval", 24*time.Hour, "Interval for fetching MaxMind GeoIP2 DB updates")
 	cachePurgePeriod := flag.Duration("purge-interval", 2*time.Minute, "Interval for clearing the cache")
 
 	flag.Parse()
 
+	allowedMap := make(map[string]bool, 0)
+	for c := range strings.SplitSeq(*allowedCountryList, ",") {
+		allowedMap[strings.ToUpper(strings.TrimSpace(c))] = true
+	}
+	excludeSubnets := make([]*net.IPNet, 0, 10)
+	for cidr := range strings.SplitSeq(*excludeCIDR, ",") {
+		_, ipnet, err := net.ParseCIDR(strings.TrimSpace(cidr))
+		if err == nil {
+			excludeSubnets = append(excludeSubnets, ipnet)
+		}
+	}
+
 	Config = &config{
 		DbPath:               *dbPath,
 		Port:                 *port,
-		ExcludeCIDR:          *excludeCIDR,
-		AllowedCountryList:   *allowedCountryList,
+		ExcludeCIDR:          excludeSubnets,
+		AllowedCodes:         allowedMap,
 		IpHeader:             *ipHeader,
 		LogLevelFlag:         *logLevelFlag,
 		CachePurgePeriod:     *cachePurgePeriod,

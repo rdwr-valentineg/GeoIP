@@ -39,7 +39,7 @@ jobs:
         run: |
           docker run -d --name geoip-ok -p 8080:8080 \
             -v ${{ github.workspace }}/mmdb:/mmdb \
-            geoip-test --exclude 192.168.0.0/24
+            geoip-test --exclude 192.168.0.0/24 --db /mmdb/GeoLite2-Country.mmdb --log-level debug
 
       - name: Wait for readiness
         run: sleep 5

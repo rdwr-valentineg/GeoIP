@@ -123,11 +123,20 @@ func TestInitConfig(t *testing.T) {
 				if cfg.Port != 9090 {
 					return errors.New("unexpected Port")
 				}
-				if cfg.ExcludeCIDR != "1.2.3.4/32" {
+				if len(cfg.ExcludeCIDR) >= 1 &&
+					cfg.ExcludeCIDR[0] != nil &&
+					cfg.ExcludeCIDR[0].IP != nil &&
+					cfg.ExcludeCIDR[0].IP.String() != "1.2.3.4/32" {
 					return errors.New("unexpected ExcludeCIDR")
 				}
-				if cfg.AllowedCountryList != "DE,FR" {
-					return errors.New("unexpected AllowedCountryList")
+				if res, found := cfg.AllowedCodes["DE"]; !res || !found {
+					return errors.New("unexpected AllowedCountryList - DE should be present")
+				}
+				if res, found := cfg.AllowedCodes["FR"]; !res || !found {
+					return errors.New("unexpected AllowedCountryList, FR should be present")
+				}
+				if res, found := cfg.AllowedCodes["RU"]; res || found {
+					return errors.New("unexpected AllowedCountryList, RU should not be present")
 				}
 				if cfg.IpHeader != "Real-IP" {
 					return errors.New("unexpected IpHeader")

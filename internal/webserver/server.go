@@ -2,62 +2,60 @@ package webserver
 
 import (
 	"fmt"
-	"net"
 	"net/http"
-	"strings"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rdwr-valentineg/GeoIP/internal/config"
 	"github.com/rdwr-valentineg/GeoIP/internal/db"
 	"github.com/rs/zerolog/log"
 )
 
 type Server struct {
-	Db           db.GeoIPSource
-	AllowedCodes map[string]bool // e.g., {"US": true}
-	AllowedCidrs []*net.IPNet    // e.g., {"10.0.0.0/8", "192.168.0.0/16"}
+	Srv *http.Server
 }
 
-func NewServer(source db.GeoIPSource) *Server {
-	allowedMap := make(map[string]bool, 0)
-	for c := range strings.SplitSeq(config.Config.AllowedCountryList, ",") {
-		allowedMap[strings.ToUpper(strings.TrimSpace(c))] = true
-	}
-	excludeSubnets := make([]*net.IPNet, 0, 10)
-	for cidr := range strings.SplitSeq(config.Config.ExcludeCIDR, ",") {
-		_, ipnet, err := net.ParseCIDR(strings.TrimSpace(cidr))
-		if err == nil {
-			excludeSubnets = append(excludeSubnets, ipnet)
-		}
-	}
+func Run(source db.GeoIPSource) (*Server, error) {
+	mux := http.NewServeMux()
 
-	return &Server{
-		Db:           source,
-		AllowedCodes: allowedMap,
-		AllowedCidrs: excludeSubnets,
-	}
-}
+	// s := &Server{
+	// 	Db: source,
+	// 	Srv: &http.Server{
+	// 		Addr:    ":" + config.Config.Port,
+	// 		Handler: mux,
+	// }
 
-func (srv *Server) Start() error {
-	log.Info().Uint("port", config.Config.Port).Msg("GeoIP server listening")
-	if err := http.ListenAndServe(fmt.Sprintf(":%d", config.Config.Port), nil); err != nil {
-		return fmt.Errorf("failed to start server: %w", err)
-	}
+	mux.Handle("/auth", NewAuthHandler(source))
 
-	http.HandleFunc("/auth", srv.ServeHTTP)
-
-	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		log.Debug().Msg("/healthz endpoint called")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok"))
 	})
 
-	http.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) {
-		if !srv.Db.IsReady() {
+	mux.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) {
+		ready := source.IsReady()
+		log.Debug().Bool("Ready", ready).Msg("/healthz endpoint called")
+		if !ready {
 			log.Warn().Msg("GeoIP database is not ready")
 			http.Error(w, "Service not ready", http.StatusServiceUnavailable)
-			return
+		} else {
+			w.WriteHeader(http.StatusOK)
 		}
-		w.WriteHeader(http.StatusOK)
 	})
 
-	return nil
+	mux.Handle("/metrics", promhttp.Handler())
+	addr := fmt.Sprintf(":%d", config.Config.Port)
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: mux,
+	}
+
+	go func() {
+		log.Info().Uint("port", config.Config.Port).Msg("GeoIP server listening")
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatal().Err(err).Msg("HTTP server error")
+		}
+	}()
+
+	return &Server{Srv: srv}, nil
 }

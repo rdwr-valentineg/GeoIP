@@ -7,17 +7,19 @@ import (
 
 	"github.com/rdwr-valentineg/GeoIP/internal/config"
 	"github.com/rdwr-valentineg/GeoIP/internal/metrics"
+	"github.com/rs/zerolog/log"
 )
 
 func serveVerdict(w http.ResponseWriter, allowed bool, country string) {
 	if allowed {
 		respondAllowed(w, country)
 		metrics.RequestsTotal.WithLabelValues(country, "true").Inc()
-		return
+		log.Debug().Str("Country", country).Msg("allowed")
+	} else {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		metrics.RequestsTotal.WithLabelValues(country, "false").Inc()
+		log.Debug().Str("Country", country).Msg("denied")
 	}
-	http.Error(w, "Forbidden", http.StatusForbidden)
-	metrics.RequestsTotal.WithLabelValues(country, "false").Inc()
-	return
 }
 
 func isExcluded(ip net.IP, excluded []*net.IPNet) bool {
@@ -35,12 +37,14 @@ func respondAllowed(w http.ResponseWriter, isoCode string) {
 }
 
 func getIPFromRequest(r *http.Request) net.IP {
-	forwarded := r.Header.Get(config.Config.IpHeader)
-	if forwarded != "" {
-		parts := strings.Split(forwarded, ",")
+	hdr := r.Header.Get(config.Config.IpHeader)
+	if hdr != "" {
+		log.Debug().Str("value", hdr).Msg("ip header found")
+		parts := strings.Split(hdr, ",")
 		ip := strings.TrimSpace(parts[0])
 		return net.ParseIP(ip)
 	}
+	log.Debug().Str("value", r.RemoteAddr).Msg("ip header found not found, using RemoteAddr")
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return nil
