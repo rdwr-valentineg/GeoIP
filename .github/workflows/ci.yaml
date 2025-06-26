@@ -61,19 +61,12 @@ jobs:
       - name: Dump container logs on failure
         if: failure()
         run: |
+          echo "===== Running containers ====="
+          docker ps -a
           echo "===== geoip-test logs ====="
           docker logs geoip-ok || true
-
-      - name: Save container logs to file
-        if: failure()
-        run: docker logs geoip-ok > geoip.log || true
+          docker logs geoip-test || true
       
-      - name: Upload container logs
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: geoip-ok-log
-          path: geoip.log
 
       - name: Test missing DB (should fail gracefully)
         run: |
