@@ -2,7 +2,7 @@
 FROM golang:1.24.4 AS builder
 WORKDIR /app
 COPY . .
-RUN go build -o geoip-auth-server
+RUN CGO_ENABLED=0 GOOS=linux go build -o geoip-auth-server
 
 # Final minimal image
 FROM scratch
