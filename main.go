@@ -59,19 +59,17 @@ func main() {
 	if err != nil {
 		log.Fatal().Err(err).Msg("Invalid configuration")
 	}
-	cfg := config.Config
-	log.Debug().Any("config", cfg).Msg("Configuration initialized")
 
 	InitLogger()
 
 	var source db.GeoIPSource
 	switch {
-	case cfg.MaxMindLicenseKey != "":
+	case config.GetMaxMindLicenseKey() != "":
 		log.Debug().Msg("Using MaxMind remote fetcher")
 		source = db.NewRemoteFetcher()
-	case cfg.DbPath != "":
+	case config.GetDbPath() != "":
 		log.Debug().Msg("Using MaxMind local fetcher")
-		source = db.NewDiskLoader(cfg.DbPath)
+		source = db.NewDiskLoader(config.GetDbPath())
 	default:
 		log.Fatal().Msg("Either --db-path or --maxmind-license-key must be provided")
 	}
@@ -84,7 +82,7 @@ func main() {
 	defer source.Stop()
 
 	metrics.InitMetrics()
-	clearCachePeriodically(cfg.CachePurgePeriod)
+	clearCachePeriodically(config.GetCachePurgePeriod())
 	s, err := webserver.Run(source)
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to start web server")

@@ -57,7 +57,7 @@ func (d *DiskLoader) Reload() error {
 	return nil
 }
 
-func (d *DiskLoader) GetReader() *maxminddb.Reader {
+func (d *DiskLoader) GetReader() ReaderInterface {
 	d.mutex.RLock()
 	defer d.mutex.RUnlock()
 	return d.reader

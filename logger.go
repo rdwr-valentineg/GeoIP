@@ -7,7 +7,8 @@ import (
 )
 
 func InitLogger() {
-	switch config.Config.LogLevelFlag {
+	loglevel := config.GetLogLevel()
+	switch loglevel {
 	case "none":
 		log.Logger = log.Output(zerolog.Nop())
 	case "error":
@@ -17,6 +18,6 @@ func InitLogger() {
 	case "debug":
 		log.Logger = log.Level(zerolog.DebugLevel)
 	default:
-		log.Fatal().Msgf("Unknown log level: %s", config.Config.LogLevelFlag)
+		log.Fatal().Msgf("Unknown log level: %s", loglevel)
 	}
 }

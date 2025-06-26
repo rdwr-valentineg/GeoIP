@@ -1,12 +1,19 @@
 package db
 
-import "github.com/oschwald/maxminddb-golang"
+import (
+	"net"
+)
 
 // GeoIPSource abstracts a GeoIP database source.
 type GeoIPSource interface {
 	Start() error
 	Stop() error
-	GetReader() *maxminddb.Reader
+	GetReader() ReaderInterface
 	IsReady() bool
 	Reload() error
+}
+
+type ReaderInterface interface {
+	Lookup(ip net.IP, result interface{}) error
+	Close() error
 }
