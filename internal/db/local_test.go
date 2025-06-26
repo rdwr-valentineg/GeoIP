@@ -13,7 +13,7 @@ func TestDiskLoader_LoadsAndReloads(t *testing.T) {
 
 	defer os.Remove(tmpFile.Name())
 
-	if _, err := tmpFile.Write(GenerateMockMMDB()); err != nil {
+	if _, err := tmpFile.Write(GenerateValidMockMMDB()); err != nil {
 		t.Fatalf("shoulg have passed, failed to write to temp file: %v", err)
 	}
 	if err := tmpFile.Close(); err != nil {

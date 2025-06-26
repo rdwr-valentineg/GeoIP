@@ -66,7 +66,7 @@ func (ah *AuthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if isExcluded(ip, config.Config.ExcludeCIDR) {
+	if isExcluded(ip, config.GetExcludeCIDR()) {
 		log.Debug().Str("ip", ip.String()).Msg("Excluded IP allowed")
 		respondAllowed(w, "LAN")
 		metrics.RequestsTotal.WithLabelValues("LAN", "true").Inc()
@@ -81,7 +81,7 @@ func (ah *AuthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	isoCode := strings.ToUpper(record.Country.ISOCode)
-	allowed := config.Config.AllowedCodes[isoCode]
+	allowed := config.GetAllowedCodes()[isoCode]
 
 	cacheMux.Lock()
 	geoCache[ip.String()] = cacheEntry{

@@ -7,15 +7,18 @@ import (
 	"os"
 	"sync"
 	"time"
-
+	"strings"
+        "encoding/base64"
 	"github.com/rs/zerolog/log"
+        "archive/tar"
+	"compress/gzip"
 
 	"github.com/oschwald/maxminddb-golang"
 	"github.com/rdwr-valentineg/GeoIP/internal/config"
 )
 
 type RemoteFetcher struct {
-	LicenseKey string
+	BasicAuth string
 	DBPath     string // optional
 	Interval   time.Duration
 	Client     *http.Client
@@ -26,22 +29,24 @@ type RemoteFetcher struct {
 	inMemory   bool
 }
 
-var maxmindBaseURL = "https://download.maxmind.com/app/geoip_download"
+var maxmindBaseURL = "https://download.maxmind.com/geoip/databases/GeoLite2-Country/download?suffix=tar.gz"
 
 func NewRemoteFetcher() *RemoteFetcher {
-	cfg := config.Config
+	auth := fmt.Sprintf("%s:%s", config.GetMaxMindAccountId(), config.GetMaxMindLicenseKey())
+	b64Auth := base64.StdEncoding.EncodeToString([]byte(auth))
+
 	return &RemoteFetcher{
-		LicenseKey: cfg.MaxMindLicenseKey,
-		DBPath:     cfg.DbPath,
-		Interval:   cfg.MaxMindFetchInterval,
+		BasicAuth: "Basic "+b64Auth,
+		DBPath:     config.GetDbPath(),
+		Interval:   config.GetMaxMindFetchInterval(),
 		Client:     &http.Client{Timeout: 30 * time.Second},
-		inMemory:   cfg.DbPath == "",
+		inMemory:   config.GetDbPath() == "",
 	}
 }
 
 func (r *RemoteFetcher) Start() error {
-	if r.LicenseKey == "" {
-		return fmt.Errorf("license key is required")
+	if r.BasicAuth == "" {
+		return fmt.Errorf("auth info is required")
 	}
 
 	r.done = make(chan struct{})
@@ -90,8 +95,14 @@ func (r *RemoteFetcher) periodicFetch() {
 }
 
 func (r *RemoteFetcher) fetch() error {
-	url := fmt.Sprintf("%s?edition_id=GeoLite2-Country&license_key=%s&suffix=mmdb", maxmindBaseURL, r.LicenseKey)
-	resp, err := r.Client.Get(url)
+	req, err := http.NewRequest("GET", maxmindBaseURL, nil)
+	if err != nil {
+		panic(err)
+	}
+
+	// Add Basic Auth header
+	req.Header.Add("Authorization", r.BasicAuth)
+resp, err := r.Client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -101,9 +112,22 @@ func (r *RemoteFetcher) fetch() error {
 		return fmt.Errorf("bad response: %s", resp.Status)
 	}
 
+	gzr, err := gzip.NewReader(resp.Body)
+	if err != nil {
+		panic(err)
+	}
+	defer gzr.Close()
+
+	tr := tar.NewReader(gzr)
+	data,size , err := extractFileFromTar(tr, "GeoLite2-Country.mmdb")
+	if err != nil {
+		panic(err)
+	}
+
+        buf := make([]byte, size)
 	var reader *maxminddb.Reader
 	if r.inMemory {
-		buf, err := io.ReadAll(resp.Body)
+		_, err := io.ReadFull(data, buf)
 		if err != nil {
 			return err
 		}
@@ -118,7 +142,7 @@ func (r *RemoteFetcher) fetch() error {
 		if err != nil {
 			return err
 		}
-		if _, err := io.Copy(out, resp.Body); err != nil {
+		if _, err := io.CopyN(out, data, size); err != nil {
 			out.Close()
 			return err
 		}
@@ -143,4 +167,28 @@ func (r *RemoteFetcher) fetch() error {
 	r.reader = reader
 	r.ready = true
 	return nil
+}
+
+func extractFileFromTar(tr *tar.Reader, target string) (io.Reader, int64, error) {
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, 0, err
+		}
+
+		if header.Typeflag != tar.TypeReg {
+			continue
+		}
+
+		log.Info().Str("name", header.Name).Msg("found in tar")
+
+		if strings.Contains( header.Name, target) {
+			// Wrap in a LimitedReader to avoid reading beyond the file size
+			return io.LimitReader(tr, header.Size), header.Size, nil
+		}
+	}
+	return nil, 0, fmt.Errorf("file %s not found in archive", target)
 }

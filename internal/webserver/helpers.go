@@ -37,7 +37,7 @@ func respondAllowed(w http.ResponseWriter, isoCode string) {
 }
 
 func getIPFromRequest(r *http.Request) net.IP {
-	hdr := r.Header.Get(config.Config.IpHeader)
+	hdr := r.Header.Get(config.GetIpHeader())
 	if hdr != "" {
 		log.Debug().Str("value", hdr).Msg("ip header found")
 		parts := strings.Split(hdr, ",")

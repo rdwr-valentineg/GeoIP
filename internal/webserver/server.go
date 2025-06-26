@@ -17,13 +17,6 @@ type Server struct {
 func Run(source db.GeoIPSource) (*Server, error) {
 	mux := http.NewServeMux()
 
-	// s := &Server{
-	// 	Db: source,
-	// 	Srv: &http.Server{
-	// 		Addr:    ":" + config.Config.Port,
-	// 		Handler: mux,
-	// }
-
 	mux.Handle("/auth", NewAuthHandler(source))
 
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -44,14 +37,14 @@ func Run(source db.GeoIPSource) (*Server, error) {
 	})
 
 	mux.Handle("/metrics", promhttp.Handler())
-	addr := fmt.Sprintf(":%d", config.Config.Port)
+	addr := fmt.Sprintf(":%d", config.GetPort())
 	srv := &http.Server{
 		Addr:    addr,
 		Handler: mux,
 	}
 
 	go func() {
-		log.Info().Uint("port", config.Config.Port).Msg("GeoIP server listening")
+		log.Info().Uint("port", config.GetPort()).Msg("GeoIP server listening")
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatal().Err(err).Msg("HTTP server error")
 		}

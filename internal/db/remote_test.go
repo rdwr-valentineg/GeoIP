@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+        "archive/tar"
+	"compress/gzip"
 
 	"github.com/maxmind/mmdbwriter"
 	"github.com/maxmind/mmdbwriter/mmdbtype"
@@ -16,10 +18,13 @@ import (
 func TestRemoteFetcher_LoadsToMemory(t *testing.T) {
 	// Create mock valid .mmdb content
 	mockDB := mustMockValidMMDB(t)
-
+        arch, err := CreateTarGz(mockDB, "GeoLite2-Country.mmdb")
+	if err != nil {
+		t.Error(err)
+	}
 	// Setup mock server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write(mockDB)
+		_, _ = w.Write(arch)
 	}))
 	defer server.Close()
 
@@ -29,7 +34,7 @@ func TestRemoteFetcher_LoadsToMemory(t *testing.T) {
 	defer func() { maxmindBaseURL = oldURL }()
 
 	remote := &RemoteFetcher{
-		LicenseKey: "dummy",
+		BasicAuth: "dummy",
 		DBPath:     "",
 		Interval:   time.Hour,
 		Client:     server.Client(),
@@ -60,10 +65,10 @@ func mustMockValidMMDB(t *testing.T) []byte {
 	// Embed a known valid file or prepare a minimal valid binary via tools (skipped here).
 	// This will fail at runtime if the reader expects a real file.
 	// Use a pre-generated file with maxminddb.NewFromBytes() in real scenarios.
-	return GenerateMockMMDB()
+	return GenerateValidMockMMDB()
 }
 
-func GenerateMockMMDB() []byte {
+func GenerateValidMockMMDB() []byte {
 	addNet := func(writer *mmdbwriter.Tree, ip string, mask int, isoCode string) error {
 		net := &net.IPNet{
 			IP:   net.ParseIP("1.2.3.0"),
@@ -98,4 +103,43 @@ func GenerateMockMMDB() []byte {
 	}
 
 	return buf.Bytes()
+}
+
+// CreateTarGz creates a .tar.gz archive in memory with one file.
+func CreateTarGz(data []byte, filename string) ([]byte, error) {
+	var buf bytes.Buffer
+
+	// gzip writer
+	gzw := gzip.NewWriter(&buf)
+	defer gzw.Close()
+
+	// tar writer inside gzip
+	tw := tar.NewWriter(gzw)
+	defer tw.Close()
+
+	// Write tar header
+	hdr := &tar.Header{
+		Name:    filename,
+		Mode:    0644,
+		Size:    int64(len(data)),
+		ModTime: time.Now(),
+	}
+	if err := tw.WriteHeader(hdr); err != nil {
+		return nil, err
+	}
+
+	// Write file content
+	if _, err := tw.Write(data); err != nil {
+		return nil, err
+	}
+
+	// Close both writers to flush buffers
+	if err := tw.Close(); err != nil {
+		return nil, err
+	}
+	if err := gzw.Close(); err != nil {
+		return nil, err
+	}
+
+	return buf.Bytes(), nil
 }

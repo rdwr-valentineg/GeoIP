@@ -7,7 +7,10 @@ build:
 	go build -o $(APP_NAME)
 
 test:
-	go test ./...
+	go test -count=1 ./...
+
+cover:
+	go test -count=1 -cover ./...
 
 run:
 	./$(APP_NAME)
