@@ -44,7 +44,7 @@ func Run(source db.GeoIPSource) (*Server, error) {
 	}
 
 	go func() {
-		log.Info().Uint("port", config.GetPort()).Msg("GeoIP server listening")
+		log.Info().Str("addr", addr).Msg("GeoIP server listening")
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatal().Err(err).Msg("HTTP server error")
 		}
