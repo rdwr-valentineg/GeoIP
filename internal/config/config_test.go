@@ -57,6 +57,16 @@ func TestValidate(t *testing.T) {
 			},
 			wantErr: "cache purge interval must be greater than zero",
 		},
+		"good maxmind license key but missing account id": {
+			config: &config{
+				DbPath:            "test.db",
+				Port:              8080,
+				IpHeader:          "some-header",
+				CachePurgePeriod:  10,
+				MaxMindLicenseKey: "valid-key",
+			},
+			wantErr: "when maxmind license key provided, maxmind account id is required",
+		},
 	}
 
 	for name, tc := range tests {
@@ -97,6 +107,9 @@ func TestInitConfig(t *testing.T) {
 				"-ip-header=Real-IP",
 				"-log-level=debug",
 				"-purge-interval=5m",
+				"-maxmind-license-key=valid-key",
+				"-maxmind-account-id=valid-id",
+				"-maxmind-fetch-interval=1h",
 			},
 			wantErr: false,
 			wantCheck: func(cfg *config) error {
@@ -134,6 +147,15 @@ func TestInitConfig(t *testing.T) {
 				if cfg.CachePurgePeriod != 5*time.Minute {
 					return errors.New("unexpected CachePurgePeriod, expected [5m]")
 				}
+				if cfg.MaxMindLicenseKey != "valid-key" {
+					return errors.New("unexpected MaxMindLicenseKey, expected [valid-key]")
+				}
+				if cfg.MaxMindAccountId != "valid-id" {
+					return errors.New("unexpected MaxMindAccountId, expected [valid-id]")
+				}
+				if cfg.MaxMindFetchInterval != time.Hour {
+					return errors.New("unexpected MaxMindFetchInterval, expected [1h]")
+				}
 				return nil
 			},
 		},
@@ -159,22 +181,130 @@ func TestInitConfig(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			resetFlags()
 			os.Args = tc.args
-			Config = nil // Reset global config before each test
+			cfg = nil // Reset global config before each test
 			err := InitConfig()
 			if tc.wantErr {
 				if err == nil {
-					t.Errorf("InitConfig() expected error, got nil, config: %+v", Config)
+					t.Errorf("InitConfig() expected error, got nil, config: %+v", cfg)
 				}
 			} else {
 				if err != nil {
-					t.Errorf("InitConfig() unexpected error: %v, config: %+v", err, Config)
+					t.Errorf("InitConfig() unexpected error: %v, config: %+v", err, cfg)
 				}
 				if tc.wantCheck != nil {
-					if checkErr := tc.wantCheck(Config); checkErr != nil {
-						t.Errorf("Config check failed: %v config: %+v", checkErr, Config)
+					if checkErr := tc.wantCheck(cfg); checkErr != nil {
+						t.Errorf("Config check failed: %v config: %+v", checkErr, cfg)
 					}
 				}
 			}
 		})
 	}
+}
+
+func TestGetStringGetters(t *testing.T) {
+	// Save original cfg and restore after test
+	origCfg := cfg
+	defer func() { cfg = origCfg }()
+
+	t.Run("cfg is nil", func(t *testing.T) {
+		cfg = nil
+		dbPath := GetDbPath()
+		if dbPath != "" {
+			t.Errorf("GetDbPath() with nil cfg = %q, want empty string", dbPath)
+		}
+		port := GetPort()
+		if port != 0 {
+			t.Errorf("GetPort() with nil cfg = %d, want 0", port)
+		}
+		ipHeader := GetIpHeader()
+		if ipHeader != "" {
+			t.Errorf("GetIpHeader() with nil cfg = %q, want empty string", ipHeader)
+		}
+		loglevel := GetLogLevel()
+		if loglevel != "" {
+			t.Errorf("GetLogLevelFlag() with nil cfg = %q, want empty string", loglevel)
+		}
+		key := GetMaxMindLicenseKey()
+		if key != "" {
+			t.Errorf("GetMaxMindLicenseKey() with nil cfg = %q, want empty string", key)
+		}
+		id := GetMaxMindAccountId()
+		if id != "" {
+			t.Errorf("GetMaxMindAccountId() with nil cfg = %q, want empty string", id)
+		}
+		mmInterval := GetMaxMindFetchInterval()
+		if mmInterval != time.Duration(0) {
+			t.Errorf("GetMaxMindAccountId() with nil cfg = %q, want empty string", mmInterval)
+		}
+		pInterval := GetCachePurgePeriod()
+		if pInterval != time.Duration(0) {
+			t.Errorf("GetMaxMindAccountId() with nil cfg = %q, want empty string", pInterval)
+		}
+		allowed := GetAllowedCodes()
+		if allowed != nil {
+			t.Errorf("GetMaxMindAccountId() with nil cfg = %v, want empty string", allowed)
+		}
+		excludes := GetExcludeCIDR()
+		if excludes != nil {
+			t.Errorf("GetMaxMindAccountId() with nil cfg = %q, want empty string", excludes)
+		}
+	})
+
+	t.Run("cfg is set", func(t *testing.T) {
+		cfg = &config{
+			DbPath:               "test.db",
+			Port:                 8080,
+			IpHeader:             "X-Forwarded-For",
+			LogLevelFlag:         "info",
+			MaxMindLicenseKey:    "test-key",
+			MaxMindAccountId:     "test-id",
+			MaxMindFetchInterval: 30 * time.Minute,
+			CachePurgePeriod:     10 * time.Minute,
+			AllowedCodes:         map[string]bool{"US": true},
+			ExcludeCIDR: []*net.IPNet{{
+				IP:   net.ParseIP("1.2.3.4"),
+				Mask: net.CIDRMask(32, 32),
+			}},
+		}
+		dbPath := GetDbPath()
+		if dbPath != "test.db" {
+			t.Errorf("GetDbPath() = %q, want %q", dbPath, "test.db")
+		}
+		port := GetPort()
+		if port != 8080 {
+			t.Errorf("GetPort() = %d, want %d", port, 8080)
+		}
+		ipHeader := GetIpHeader()
+		if ipHeader != "X-Forwarded-For" {
+			t.Errorf("GetIpHeader() = %q, want %q", ipHeader, "X-Forwarded-For")
+		}
+		loglevel := GetLogLevel()
+		if loglevel != "info" {
+			t.Errorf("GetLogLevel() = %q, want %q", loglevel, "info")
+		}
+		key := GetMaxMindLicenseKey()
+		if key != "test-key" {
+			t.Errorf("GetMaxMindLicenseKey() = %q, want %q", key, "test-key")
+		}
+		id := GetMaxMindAccountId()
+		if id != "test-id" {
+			t.Errorf("GetMaxMindAccountId() = %q, want %q", id, "test-id")
+		}
+		mmInterval := GetMaxMindFetchInterval()
+		if mmInterval != 30*time.Minute {
+			t.Errorf("GetMaxMindFetchInterval() = %v, want %v", mmInterval, 30*time.Minute)
+		}
+		pInterval := GetCachePurgePeriod()
+		if pInterval != 10*time.Minute {
+			t.Errorf("GetCachePurgePeriod() = %v, want %v", pInterval, 10*time.Minute)
+		}
+		allowed := GetAllowedCodes()
+		if allowed == nil || !allowed["US"] {
+			t.Errorf("GetAllowedCodes() = %v, want map with 'US':true", allowed)
+		}
+		excludes := GetExcludeCIDR()
+		if excludes == nil || excludes[0] == nil || !excludes[0].IP.Equal(net.ParseIP("1.2.3.4")) {
+			t.Errorf("GetExcludeCIDR() = %v, want first IPNet with IP 1.2.3.4", excludes)
+		}
+	})
 }
