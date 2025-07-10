@@ -17,34 +17,34 @@ import (
 	"github.com/rdwr-valentineg/GeoIP/internal/metrics"
 )
 
-// --- Mocks and helpers ---
-
-type mockGeoIPSource struct {
-	db.GeoIPSource
-	ready  bool
-	lookup func(ip net.IP, record any) error
-}
+type (
+	mockGeoIPSource struct {
+		db.GeoIPSource
+		ready  bool
+		lookup func(ip net.IP, record any) error
+	}
+	mockGeoIPReader struct {
+		*maxminddb.Reader
+		lookup func(ip net.IP, record any) error
+	}
+)
 
 func (m *mockGeoIPSource) IsReady() bool {
 	return m.ready
 }
+
 func (m *mockGeoIPSource) GetReader() db.ReaderInterface {
 	return &mockGeoIPReader{lookup: m.lookup}
-}
-
-type mockGeoIPReader struct {
-	*maxminddb.Reader
-	lookup func(ip net.IP, record any) error
 }
 
 func (m *mockGeoIPReader) Lookup(ip net.IP, record any) error {
 	return m.lookup(ip, record)
 }
+
 func (m *mockGeoIPReader) Close() error {
 	return nil // No-op for mock
 }
 
-// Patchable helpers
 var (
 	origGetIPFromRequest = getIPFromRequest
 	origIsExcluded       = isExcluded
@@ -126,6 +126,12 @@ func TestServeHTTP_CacheHit(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "cache hit") {
 		t.Errorf("Expected 'cache hit' in response body, got: %s", w.Body.String())
+	}
+	if CacheCleanup() != 1 {
+		t.Error("CacheCleanup should have evicted 1 entry")
+	}
+	if len(geoCache) != 0 {
+		t.Error("Cache should be empty after cleanup")
 	}
 }
 

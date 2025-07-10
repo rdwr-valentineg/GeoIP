@@ -11,6 +11,11 @@ var (
 	RequestsTotal  *prometheus.CounterVec
 	CacheHits      prometheus.Counter
 	CacheEvictions prometheus.Counter
+
+	// Remote fetcher metrics
+	FetchAttemptsTotal *prometheus.CounterVec
+	FetchSuccessTotal  prometheus.Counter
+	FetchErrorsTotal   *prometheus.CounterVec
 )
 
 func InitMetrics() {
@@ -40,7 +45,32 @@ func registerMetrics() {
 		},
 	)
 
+	// Remote fetcher metrics
+	FetchAttemptsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "geoip_remote_fetch_attempts_total",
+			Help: "Total number of remote fetch attempts",
+		},
+		[]string{"endpoint"},
+	)
+	FetchSuccessTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "geoip_remote_fetch_success_total",
+			Help: "Total number of successful remote fetches",
+		},
+	)
+	FetchErrorsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "geoip_remote_fetch_errors_total",
+			Help: "Total number of remote fetch errors by type",
+		},
+		[]string{"error_type"},
+	)
+
 	prometheus.MustRegister(RequestsTotal)
 	prometheus.MustRegister(CacheHits)
 	prometheus.MustRegister(CacheEvictions)
+	prometheus.MustRegister(FetchAttemptsTotal)
+	prometheus.MustRegister(FetchSuccessTotal)
+	prometheus.MustRegister(FetchErrorsTotal)
 }

@@ -4,177 +4,595 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
-	"io"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/maxmind/mmdbwriter"
 	"github.com/maxmind/mmdbwriter/mmdbtype"
+	"github.com/rdwr-valentineg/GeoIP/internal/metrics"
 )
 
-func TestRemoteFetcher_LoadsToMemory(t *testing.T) {
-	// Create mock valid .mmdb content
+// Test helpers and fixtures
+func init() {
+	// Initialize metrics for tests
+	metrics.InitMetrics()
+}
+
+type (
+	testServer struct {
+		server    *httptest.Server
+		oldURL    string
+		client    *http.Client
+		responses []testResponse
+	}
+
+	testResponse struct {
+		statusCode int
+		body       []byte
+		headers    map[string]string
+	}
+	mockClient struct {
+		err error
+		res *http.Response
+	}
+)
+
+func (m *mockClient) Do(_ *http.Request) (*http.Response, error) {
+	return m.res, m.err
+}
+
+func newTestServer(responses ...testResponse) *testServer {
+	ts := &testServer{
+		responses: responses,
+	}
+
+	responseIndex := 0
+	ts.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if responseIndex >= len(ts.responses) {
+			responseIndex = len(ts.responses) - 1 // Use last response
+		}
+
+		resp := ts.responses[responseIndex]
+		responseIndex++
+
+		// Set headers
+		for key, value := range resp.headers {
+			w.Header().Set(key, value)
+		}
+
+		w.WriteHeader(resp.statusCode)
+		if resp.body != nil {
+			w.Write(resp.body)
+		}
+	}))
+
+	ts.oldURL = maxmindBaseURL
+	maxmindBaseURL = ts.server.URL
+	ts.client = ts.server.Client()
+
+	return ts
+}
+
+func (ts *testServer) close() {
+	ts.server.Close()
+	maxmindBaseURL = ts.oldURL
+}
+
+func newValidMMDBArchive(t *testing.T) []byte {
+	t.Helper()
 	mockDB := mustMockValidMMDB(t)
 	arch, err := CreateTarGz(mockDB, "GeoLite2-Country.mmdb")
 	if err != nil {
-		t.Error(err)
+		t.Fatalf("failed to create valid archive: %v", err)
 	}
-	// Setup mock server
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write(arch)
-	}))
-	defer server.Close()
+	return arch
+}
 
-	// Patch URL for test
-	oldURL := maxmindBaseURL
-	maxmindBaseURL = server.URL
-	defer func() { maxmindBaseURL = oldURL }()
-
-	remote := &RemoteFetcher{
-		BasicAuth: "dummy",
-		DBPath:    "",
+func newTestRemoteFetcher(client HTTPClient, inMemory bool, dbPath string) *RemoteFetcher {
+	return &RemoteFetcher{
+		BasicAuth: "Basic test-auth",
+		DBPath:    dbPath,
 		Interval:  time.Hour,
-		Client:    server.Client(),
-		inMemory:  true,
+		Client:    client,
+		inMemory:  inMemory,
 	}
+}
+
+func TestNewRemoteFetcher(t *testing.T) {
+	cfg := Config{
+		AccountID:  "test-account",
+		LicenseKey: "test-license",
+		DBPath:     "/tmp/test.mmdb",
+		Interval:   time.Hour,
+	}
+
+	rf := NewRemoteFetcher(cfg)
+	if rf == nil {
+		t.Fatal("expected non-nil RemoteFetcher")
+	}
+	if rf.BasicAuth == "" {
+		t.Error("expected BasicAuth to be set")
+	}
+	if rf.DBPath != "/tmp/test.mmdb" {
+		t.Errorf("expected DBPath to be '/tmp/test.mmdb', got %s", rf.DBPath)
+	}
+	if rf.Interval != time.Hour {
+		t.Errorf("expected Interval to be 1 hour, got %v", rf.Interval)
+	}
+	if rf.Client == nil {
+		t.Error("expected non-nil HTTP client")
+	}
+	if rf.inMemory {
+		t.Error("expected inMemory to be false for file-based config")
+	}
+}
+
+func TestNewRemoteFetcher_InMemory(t *testing.T) {
+	cfg := Config{
+		AccountID:  "test-account",
+		LicenseKey: "test-license",
+		DBPath:     "", // Empty path means in-memory
+		Interval:   time.Hour,
+	}
+
+	rf := NewRemoteFetcher(cfg)
+	if !rf.inMemory {
+		t.Error("expected inMemory to be true for empty DBPath")
+	}
+}
+
+func TestRemoteFetcher_Start(t *testing.T) {
+	cfg := Config{
+		AccountID:  "test-account",
+		LicenseKey: "test-license",
+		DBPath:     "",
+		Interval:   time.Hour,
+	}
+	rf := NewRemoteFetcher(cfg)
+
+	if err := rf.Start(); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	if rf.done == nil {
+		t.Fatal("expected done channel to be initialized")
+	}
+	if err := rf.Stop(); err != nil {
+		t.Fatalf("Stop failed: %v", err)
+	}
+}
+
+func TestRemoteFetcher_LoadsToMemory(t *testing.T) {
+	archive := newValidMMDBArchive(t)
+	server := newTestServer(testResponse{
+		statusCode: http.StatusOK,
+		body:       archive,
+	})
+	defer server.close()
+
+	remote := newTestRemoteFetcher(server.client, true, "")
 
 	if err := remote.fetch(); err != nil {
 		t.Fatalf("fetch failed: %v", err)
 	}
 
-	if ready := remote.IsReady(); !ready {
-		t.Fatalf("remote should be ready after fetch, got: %v", ready)
+	if !remote.IsReady() {
+		t.Error("remote should be ready after fetch")
 	}
-	if reader := remote.GetReader(); reader == nil {
-		t.Fatalf("remote should have a reader after fetch, got: %v", reader)
-	}
-}
-
-func TestExtractFileFromTar_FindsFile(t *testing.T) {
-	content := []byte("hello world")
-	filename := "GeoLite2-Country.mmdb"
-	archive, err := CreateTarGz(content, filename)
-	if err != nil {
-		t.Fatalf("failed to create tar.gz: %v", err)
-	}
-
-	// Un-gzip
-	gzr, err := gzip.NewReader(bytes.NewReader(archive))
-	if err != nil {
-		t.Fatalf("failed to create gzip reader: %v", err)
-	}
-	defer gzr.Close()
-	tr := tar.NewReader(gzr)
-
-	r, size, err := extractFileFromTar(tr, filename)
-	if err != nil {
-		t.Fatalf("extractFileFromTar failed: %v", err)
-	}
-	if size != int64(len(content)) {
-		t.Errorf("expected size %d, got %d", len(content), size)
-	}
-	got := make([]byte, size)
-	if _, err := io.ReadFull(r, got); err != nil {
-		t.Fatalf("failed to read file from tar: %v", err)
-	}
-	if !bytes.Equal(got, content) {
-		t.Errorf("expected content %q, got %q", content, got)
+	if remote.GetReader() == nil {
+		t.Error("remote should have a reader after fetch")
 	}
 }
 
-func TestExtractFileFromTar_FileNotFound(t *testing.T) {
-	content := []byte("irrelevant")
-	archive, err := CreateTarGz(content, "somefile.txt")
-	if err != nil {
-		t.Fatalf("failed to create tar.gz: %v", err)
-	}
+// Test individual fetch method components
+func TestRemoteFetcher_downloadArchive_Success(t *testing.T) {
+	archive := newValidMMDBArchive(t)
+	server := newTestServer(testResponse{
+		statusCode: http.StatusOK,
+		body:       archive,
+	})
+	defer server.close()
 
-	gzr, err := gzip.NewReader(bytes.NewReader(archive))
-	if err != nil {
-		t.Fatalf("failed to create gzip reader: %v", err)
-	}
-	defer gzr.Close()
-	tr := tar.NewReader(gzr)
+	rf := newTestRemoteFetcher(server.client, true, "")
 
-	r, size, err := extractFileFromTar(tr, "GeoLite2-Country.mmdb")
+	resp, err := rf.downloadArchive()
+	if err != nil {
+		t.Fatalf("downloadArchive failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected status 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestRemoteFetcher_downloadArchive_BadStatus(t *testing.T) {
+	server := newTestServer(testResponse{
+		statusCode: http.StatusForbidden,
+		body:       []byte("forbidden"),
+	})
+	defer server.close()
+
+	rf := newTestRemoteFetcher(server.client, true, "")
+
+	_, err := rf.downloadArchive()
 	if err == nil {
-		t.Fatalf("expected error for missing file, got nil")
+		t.Fatal("expected error for bad status")
 	}
-	if r != nil || size != 0 {
-		t.Errorf("expected nil reader and size 0, got %v, %d", r, size)
-	}
-}
-
-func TestExtractFileFromTar_SkipsNonRegularFiles(t *testing.T) {
-	var buf bytes.Buffer
-	gzw := gzip.NewWriter(&buf)
-	tw := tar.NewWriter(gzw)
-
-	// Add a directory entry
-	dirHeader := &tar.Header{
-		Name:     "adir/",
-		Typeflag: tar.TypeDir,
-		Mode:     0755,
-		ModTime:  time.Now(),
-	}
-	if err := tw.WriteHeader(dirHeader); err != nil {
-		t.Fatalf("failed to write dir header: %v", err)
-	}
-
-	// Add the target file
-	content := []byte("abc")
-	fileHeader := &tar.Header{
-		Name:     "adir/GeoLite2-Country.mmdb",
-		Typeflag: tar.TypeReg,
-		Mode:     0644,
-		Size:     int64(len(content)),
-		ModTime:  time.Now(),
-	}
-	if err := tw.WriteHeader(fileHeader); err != nil {
-		t.Fatalf("failed to write file header: %v", err)
-	}
-	if _, err := tw.Write(content); err != nil {
-		t.Fatalf("failed to write file content: %v", err)
-	}
-	tw.Close()
-	gzw.Close()
-
-	gzr, err := gzip.NewReader(bytes.NewReader(buf.Bytes()))
-	if err != nil {
-		t.Fatalf("failed to create gzip reader: %v", err)
-	}
-	defer gzr.Close()
-	tr := tar.NewReader(gzr)
-
-	r, size, err := extractFileFromTar(tr, "GeoLite2-Country.mmdb")
-	if err != nil {
-		t.Fatalf("extractFileFromTar failed: %v", err)
-	}
-	got := make([]byte, size)
-	if _, err := io.ReadFull(r, got); err != nil {
-		t.Fatalf("failed to read file from tar: %v", err)
-	}
-	if !bytes.Equal(got, content) {
-		t.Errorf("expected content %q, got %q", content, got)
+	if !strings.Contains(err.Error(), "bad response") {
+		t.Errorf("expected 'bad response' error, got %v", err)
 	}
 }
 
-type ioDiscard struct{}
+func TestRemoteFetcher_downloadArchive_error(t *testing.T) {
+	r := &RemoteFetcher{
+		Client: &mockClient{
+			err: fmt.Errorf("simulated error"),
+		},
+	}
 
-func (ioDiscard) Write(p []byte) (int, error) { return len(p), nil }
+	if _, err := r.downloadArchive(); err == nil {
+		t.Fatal("expected error for simulated client failure")
+	}
+}
 
-// mustMockValidMMDB returns a minimal valid .mmdb file content
+func TestRemoteFetcher_downloadAndExtractDB_Success(t *testing.T) {
+	archive := newValidMMDBArchive(t)
+	server := newTestServer(testResponse{
+		statusCode: http.StatusOK,
+		body:       archive,
+	})
+	defer server.close()
+
+	rf := newTestRemoteFetcher(server.client, true, "")
+
+	data, size, err := rf.downloadAndExtractDB()
+	if err != nil {
+		t.Fatalf("downloadAndExtractDB failed: %v", err)
+	}
+
+	if size <= 0 {
+		t.Error("expected positive size")
+	}
+	if data == nil {
+		t.Error("expected non-nil data reader")
+	}
+}
+
+func TestRemoteFetcher_createInMemoryReader_Success(t *testing.T) {
+	mockDB := mustMockValidMMDB(t)
+	rf := newTestRemoteFetcher(nil, true, "")
+
+	reader, err := rf.createInMemoryReader(bytes.NewReader(mockDB), int64(len(mockDB)))
+	if err != nil {
+		t.Fatalf("createInMemoryReader failed: %v", err)
+	}
+	defer reader.Close()
+
+	if reader == nil {
+		t.Error("expected non-nil reader")
+	}
+}
+
+func TestRemoteFetcher_createInMemoryReader_InvalidData(t *testing.T) {
+	rf := newTestRemoteFetcher(nil, true, "")
+
+	_, err := rf.createInMemoryReader(strings.NewReader("invalid mmdb"), 12)
+	if err == nil {
+		t.Fatal("expected error for invalid mmdb data")
+	}
+}
+
+func TestRemoteFetcher_createFileReader_Success(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping file reader test in short mode due to Windows file locking issues")
+	}
+
+	mockDB := mustMockValidMMDB(t)
+	tempDir, err := os.MkdirTemp("", "remote_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	dbPath := filepath.Join(tempDir, "test.mmdb")
+	rf := newTestRemoteFetcher(nil, false, dbPath)
+
+	reader, err := rf.createFileReader(bytes.NewReader(mockDB), int64(len(mockDB)))
+	if err != nil {
+		// On Windows, we might get file locking issues, so just check the error type
+		if strings.Contains(err.Error(), "process cannot access the file") {
+			t.Skip("Skipping due to Windows file locking issue")
+		}
+		t.Fatalf("createFileReader failed: %v", err)
+	}
+
+	// Close reader before checking file to avoid file locking issues
+	reader.Close()
+
+	// Verify file was created
+	if _, err := os.Stat(dbPath); err != nil {
+		t.Error("expected database file to exist")
+	}
+}
+func TestRemoteFetcher_fetch_InMemory_Success(t *testing.T) {
+	archive := newValidMMDBArchive(t)
+	server := newTestServer(testResponse{
+		statusCode: http.StatusOK,
+		body:       archive,
+	})
+	defer server.close()
+
+	rf := newTestRemoteFetcher(server.client, true, "")
+
+	err := rf.fetch()
+	if err != nil {
+		t.Fatalf("fetch failed: %v", err)
+	}
+	if !rf.IsReady() {
+		t.Error("expected ready after fetch")
+	}
+	if rf.GetReader() == nil {
+		t.Error("expected reader after fetch")
+	}
+}
+
+func TestRemoteFetcher_fetch_InMemory_BadStatus(t *testing.T) {
+	server := newTestServer(testResponse{
+		statusCode: http.StatusForbidden,
+		body:       []byte("fail"),
+	})
+	defer server.close()
+
+	rf := newTestRemoteFetcher(server.client, true, "")
+
+	err := rf.fetch()
+	if err == nil || !strings.Contains(err.Error(), "bad response") {
+		t.Fatalf("expected bad response error, got %v", err)
+	}
+}
+
+func TestRemoteFetcher_fetch_InMemory_InvalidGzip(t *testing.T) {
+	server := newTestServer(testResponse{
+		statusCode: http.StatusOK,
+		body:       []byte("not a gzip"),
+	})
+	defer server.close()
+
+	rf := newTestRemoteFetcher(server.client, true, "")
+
+	err := rf.fetch()
+	if err == nil || !strings.Contains(err.Error(), "failed to create gzip reader") {
+		t.Fatalf("expected gzip error, got %v", err)
+	}
+}
+
+func TestRemoteFetcher_fetch_InMemory_MissingFileInTar(t *testing.T) {
+	arch, err := CreateTarGz([]byte("irrelevant"), "not-mmdb.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := newTestServer(testResponse{
+		statusCode: http.StatusOK,
+		body:       arch,
+	})
+	defer server.close()
+
+	rf := newTestRemoteFetcher(server.client, true, "")
+
+	err = rf.fetch()
+	if err == nil || !strings.Contains(err.Error(), "failed to extract GeoLite2-Country.mmdb from tar") {
+		t.Fatalf("expected extract error, got %v", err)
+	}
+}
+
+func TestRemoteFetcher_fetch_InMemory_InvalidMMDB(t *testing.T) {
+	arch, err := CreateTarGz([]byte("not a mmdb"), "GeoLite2-Country.mmdb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := newTestServer(testResponse{
+		statusCode: http.StatusOK,
+		body:       arch,
+	})
+	defer server.close()
+
+	rf := newTestRemoteFetcher(server.client, true, "")
+
+	err = rf.fetch()
+	if err == nil || !strings.Contains(err.Error(), "failed to create maxmind reader from bytes") {
+		t.Fatalf("expected mmdb error, got %v", err)
+	}
+}
+
+func TestRemoteFetcher_fetch_SizeLimit(t *testing.T) {
+	// Create a very large mock database to test size limits
+	largeMockDB := make([]byte, maxDBSize+1)
+	arch, err := CreateTarGz(largeMockDB, "GeoLite2-Country.mmdb")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server := newTestServer(testResponse{
+		statusCode: http.StatusOK,
+		body:       arch,
+	})
+	defer server.close()
+
+	rf := newTestRemoteFetcher(server.client, true, "")
+
+	err = rf.fetch()
+	if err == nil || !strings.Contains(err.Error(), "database too large") {
+		t.Fatalf("expected size limit error, got %v", err)
+	}
+}
+
+func TestRemoteFetcher_fetchWithRetry_Success(t *testing.T) {
+	archive := newValidMMDBArchive(t)
+	server := newTestServer(testResponse{
+		statusCode: http.StatusOK,
+		body:       archive,
+	})
+	defer server.close()
+
+	rf := newTestRemoteFetcher(server.client, true, "")
+
+	err := rf.fetchWithRetry()
+	if err != nil {
+		t.Fatalf("fetchWithRetry failed: %v", err)
+	}
+}
+
+func TestRemoteFetcher_fetchWithRetry_EventualSuccess(t *testing.T) {
+	archive := newValidMMDBArchive(t)
+	server := newTestServer(
+		testResponse{statusCode: http.StatusInternalServerError, body: []byte("error")},
+		testResponse{statusCode: http.StatusInternalServerError, body: []byte("error")},
+		testResponse{statusCode: http.StatusOK, body: archive},
+	)
+	defer server.close()
+
+	rf := newTestRemoteFetcher(server.client, true, "")
+
+	err := rf.fetchWithRetry()
+	if err != nil {
+		t.Fatalf("fetchWithRetry should succeed after retries: %v", err)
+	}
+}
+
+func TestRemoteFetcher_fetchWithRetry_MaxRetriesExceeded(t *testing.T) {
+	server := newTestServer(
+		testResponse{statusCode: http.StatusInternalServerError, body: []byte("error")},
+		testResponse{statusCode: http.StatusInternalServerError, body: []byte("error")},
+		testResponse{statusCode: http.StatusInternalServerError, body: []byte("error")},
+		testResponse{statusCode: http.StatusInternalServerError, body: []byte("error")},
+	)
+	defer server.close()
+
+	rf := newTestRemoteFetcher(server.client, true, "")
+
+	err := rf.fetchWithRetry()
+	if err == nil {
+		t.Fatal("fetchWithRetry should fail after max retries")
+	}
+}
+
+func TestRemoteFetcher_Reload(t *testing.T) {
+	archive := newValidMMDBArchive(t)
+	server := newTestServer(testResponse{
+		statusCode: http.StatusOK,
+		body:       archive,
+	})
+	defer server.close()
+
+	rf := newTestRemoteFetcher(server.client, true, "")
+
+	err := rf.Reload()
+	if err != nil {
+		t.Fatalf("Reload failed: %v", err)
+	}
+	if !rf.IsReady() {
+		t.Error("expected ready after reload")
+	}
+}
+
+func TestRemoteFetcher_IsReady(t *testing.T) {
+	rf := newTestRemoteFetcher(nil, true, "")
+
+	if rf.IsReady() {
+		t.Error("expected not ready before fetch")
+	}
+
+	// Test with ready flag set but no reader
+	rf.ready = true
+	if rf.IsReady() {
+		t.Error("expected not ready without reader")
+	}
+}
+
+func TestRemoteFetcher_GetReader(t *testing.T) {
+	rf := newTestRemoteFetcher(nil, true, "")
+
+	// Initially not ready, so IsReady should be false
+	if rf.IsReady() {
+		t.Error("expected not ready before fetch")
+	}
+
+	// After setting up a valid reader through fetch
+	archive := newValidMMDBArchive(t)
+	server := newTestServer(testResponse{
+		statusCode: http.StatusOK,
+		body:       archive,
+	})
+	defer server.close()
+
+	rf.Client = server.client
+	if err := rf.fetch(); err != nil {
+		t.Fatalf("fetch failed: %v", err)
+	}
+
+	if !rf.IsReady() {
+		t.Error("expected ready after successful fetch")
+	}
+
+	reader := rf.GetReader()
+	if reader == nil {
+		t.Error("expected non-nil reader after successful fetch")
+	}
+
+	// Test that we can actually use the reader
+	var result interface{}
+	if err := reader.Lookup(net.ParseIP("1.2.3.4"), &result); err != nil {
+		t.Errorf("lookup failed: %v", err)
+	}
+}
+
+// Integration test with actual fetch and reader
+func TestRemoteFetcher_Integration_Success(t *testing.T) {
+	archive := newValidMMDBArchive(t)
+	server := newTestServer(testResponse{
+		statusCode: http.StatusOK,
+		body:       archive,
+	})
+	defer server.close()
+
+	rf := newTestRemoteFetcher(server.client, true, "")
+
+	// Initial state - reader should be nil initially
+	if rf.IsReady() {
+		t.Error("expected not ready initially")
+	}
+
+	// After fetch
+	if err := rf.fetch(); err != nil {
+		t.Fatalf("fetch failed: %v", err)
+	}
+
+	if !rf.IsReady() {
+		t.Error("expected ready after fetch")
+	}
+	if rf.GetReader() == nil {
+		t.Error("expected reader after fetch")
+	}
+
+	// Test reader functionality
+	reader := rf.GetReader()
+	var result interface{}
+	if err := reader.Lookup(net.ParseIP("1.2.3.4"), &result); err != nil {
+		t.Errorf("lookup failed: %v", err)
+	}
+}
+
+// Test helpers for creating archives and mock data
 func mustMockValidMMDB(t *testing.T) []byte {
-	// MaxMind readers expect valid structure, not arbitrary bytes.
-	// A pre-generated valid .mmdb fixture is ideal, but for now we simulate basic usage
 	t.Helper()
-	// Embed a known valid file or prepare a minimal valid binary via tools (skipped here).
-	// This will fail at runtime if the reader expects a real file.
-	// Use a pre-generated file with maxminddb.NewFromBytes() in real scenarios.
 	return GenerateValidMockMMDB()
 }
 
@@ -190,6 +608,7 @@ func GenerateValidMockMMDB() []byte {
 			},
 		})
 	}
+
 	writer, err := mmdbwriter.New(
 		mmdbwriter.Options{
 			DatabaseType: "GeoLite2-Country",
@@ -206,7 +625,6 @@ func GenerateValidMockMMDB() []byte {
 		log.Fatalf("failed to insert RU: %v", err)
 	}
 
-	// Write to memory buffer
 	var buf bytes.Buffer
 	if _, err := writer.WriteTo(&buf); err != nil {
 		log.Fatalf("failed to write mmdb to buffer: %v", err)
@@ -215,19 +633,15 @@ func GenerateValidMockMMDB() []byte {
 	return buf.Bytes()
 }
 
-// CreateTarGz creates a .tar.gz archive in memory with one file.
 func CreateTarGz(data []byte, filename string) ([]byte, error) {
 	var buf bytes.Buffer
 
-	// gzip writer
 	gzw := gzip.NewWriter(&buf)
 	defer gzw.Close()
 
-	// tar writer inside gzip
 	tw := tar.NewWriter(gzw)
 	defer tw.Close()
 
-	// Write tar header
 	hdr := &tar.Header{
 		Name:    filename,
 		Mode:    0644,
@@ -238,12 +652,10 @@ func CreateTarGz(data []byte, filename string) ([]byte, error) {
 		return nil, err
 	}
 
-	// Write file content
 	if _, err := tw.Write(data); err != nil {
 		return nil, err
 	}
 
-	// Close both writers to flush buffers
 	if err := tw.Close(); err != nil {
 		return nil, err
 	}

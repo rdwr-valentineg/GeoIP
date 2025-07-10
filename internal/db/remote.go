@@ -3,45 +3,72 @@ package db
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"encoding/base64"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
-	"os"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/oschwald/maxminddb-golang"
 	"github.com/pkg/errors"
-	"github.com/rdwr-valentineg/GeoIP/internal/config"
+	"github.com/rdwr-valentineg/GeoIP/internal/metrics"
+	"github.com/rdwr-valentineg/GeoIP/internal/utils"
 	"github.com/rs/zerolog/log"
 )
 
-type RemoteFetcher struct {
-	BasicAuth string
-	DBPath    string // optional
-	Interval  time.Duration
-	Client    *http.Client
-	mutex     sync.RWMutex
-	reader    *maxminddb.Reader
-	ready     bool
-	done      chan struct{}
-	inMemory  bool
-}
+type (
+	RemoteFetcher struct {
+		BasicAuth string
+		DBPath    string // optional
+		Interval  time.Duration
+		Client    HTTPClient
+		mutex     sync.RWMutex
+		reader    *maxminddb.Reader
+		ready     bool
+		done      chan struct{}
+		inMemory  bool
+	}
+
+	HTTPClient interface {
+		Do(req *http.Request) (*http.Response, error)
+	}
+
+	FileSystem interface {
+		Create(name string) (io.WriteCloser, error)
+		Rename(oldpath, newpath string) error
+	}
+	Config struct {
+		AccountID  string
+		LicenseKey string
+		DBPath     string
+		Interval   time.Duration
+	}
+)
 
 var maxmindBaseURL = "https://download.maxmind.com/geoip/databases/GeoLite2-Country/download?suffix=tar.gz"
 
-func NewRemoteFetcher() *RemoteFetcher {
-	auth := fmt.Sprintf("%s:%s", config.GetMaxMindAccountId(), config.GetMaxMindLicenseKey())
+const maxDBSize = 500 * 1024 * 1024 // 500MB limit
+
+func NewRemoteFetcher(cfg Config) *RemoteFetcher {
+	auth := fmt.Sprintf("%s:%s", cfg.AccountID, cfg.LicenseKey)
 	b64Auth := base64.StdEncoding.EncodeToString([]byte(auth))
-	dbPath := config.GetDbPath()
+	dbPath := cfg.DBPath
 	return &RemoteFetcher{
 		BasicAuth: "Basic " + b64Auth,
 		DBPath:    dbPath,
-		Interval:  config.GetMaxMindFetchInterval(),
-		Client:    &http.Client{Timeout: 30 * time.Second},
-		inMemory:  dbPath == "",
+		Interval:  cfg.Interval,
+		Client: &http.Client{
+			Timeout: 30 * time.Second,
+			Transport: &http.Transport{
+				MaxIdleConns:        10,
+				MaxIdleConnsPerHost: 10,
+				IdleConnTimeout:     30 * time.Second,
+			},
+		},
+		inMemory: dbPath == "",
 	}
 }
 
@@ -75,20 +102,20 @@ func (r *RemoteFetcher) GetReader() ReaderInterface {
 }
 
 func (r *RemoteFetcher) Reload() error {
-	return r.fetch()
+	return r.fetchWithRetry()
 }
 
 func (r *RemoteFetcher) periodicFetch() {
 	ticker := time.NewTicker(r.Interval)
 	defer ticker.Stop()
 
-	if err := r.fetch(); err != nil {
+	if err := r.fetchWithRetry(); err != nil {
 		log.Info().Err(err).Msg("fetch error!")
 	}
 	for {
 		select {
 		case <-ticker.C:
-			if err := r.fetch(); err != nil {
+			if err := r.fetchWithRetry(); err != nil {
 				log.Info().Err(err).Msg("fetch error!")
 			}
 		case <-r.done:
@@ -98,98 +125,188 @@ func (r *RemoteFetcher) periodicFetch() {
 }
 
 func (r *RemoteFetcher) fetch() error {
-	req, err := http.NewRequest("GET", maxmindBaseURL, nil)
+	// Track fetch attempt
+	metrics.FetchAttemptsTotal.WithLabelValues("maxmind").Inc()
+
+	// Download and extract database
+	data, size, err := r.downloadAndExtractDB()
 	if err != nil {
-		return errors.Wrap(err, "failed to create request")
+		return err
+	}
+
+	// Validate size
+	if size > maxDBSize {
+		metrics.FetchErrorsTotal.WithLabelValues("size_validation").Inc()
+		return fmt.Errorf("database too large: %d bytes", size)
+	}
+
+	// Create reader from data
+	reader, err := r.createReader(data, size)
+	if err != nil {
+		return err
+	}
+
+	// Update the fetcher state
+	if err := r.updateReaderState(reader, size); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (r *RemoteFetcher) downloadAndExtractDB() (io.Reader, int64, error) {
+	// Download archive
+	resp, err := r.downloadArchive()
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+
+	// Extract database from archive
+	gzr, err := gzip.NewReader(resp.Body)
+	if err != nil {
+		metrics.FetchErrorsTotal.WithLabelValues("gzip_decompression").Inc()
+		return nil, 0, errors.Wrap(err, "failed to create gzip reader")
+	}
+	defer gzr.Close()
+
+	tr := tar.NewReader(gzr)
+	data, size, err := utils.ExtractFileFromTar(tr, "GeoLite2-Country.mmdb")
+	if err != nil {
+		metrics.FetchErrorsTotal.WithLabelValues("tar_extraction").Inc()
+		return nil, 0, errors.Wrap(err, "failed to extract GeoLite2-Country.mmdb from tar")
+	}
+
+	return data, size, nil
+}
+
+func (r *RemoteFetcher) downloadArchive() (*http.Response, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", maxmindBaseURL, nil)
+	if err != nil {
+		metrics.FetchErrorsTotal.WithLabelValues("http_request_creation").Inc()
+		return nil, errors.Wrap(err, "failed to create request")
 	}
 
 	// Add Basic Auth header
 	req.Header.Add("Authorization", r.BasicAuth)
 	resp, err := r.Client.Do(req)
 	if err != nil {
-		return errors.Wrap(err, "failed to fetch data")
+		metrics.FetchErrorsTotal.WithLabelValues("http_request_execution").Inc()
+		return nil, errors.Wrap(err, "failed to fetch data")
 	}
-	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("bad response: %s", resp.Status)
+		resp.Body.Close()
+		metrics.FetchErrorsTotal.WithLabelValues("http_status_error").Inc()
+		return nil, fmt.Errorf("bad response: %s", resp.Status)
 	}
 
-	gzr, err := gzip.NewReader(resp.Body)
-	if err != nil {
-		return errors.Wrap(err, "failed to create gzip reader")
-	}
-	defer gzr.Close()
+	return resp, nil
+}
 
-	tr := tar.NewReader(gzr)
-	data, size, err := extractFileFromTar(tr, "GeoLite2-Country.mmdb")
-	if err != nil {
-		return errors.Wrap(err, "failed to extract GeoLite2-Country.mmdb from tar")
-	}
-
-	var reader *maxminddb.Reader
+func (r *RemoteFetcher) createReader(data io.Reader, size int64) (*maxminddb.Reader, error) {
 	if r.inMemory {
-		buf := make([]byte, size)
-		_, err := io.ReadFull(data, buf)
-		if err != nil {
-			return errors.Wrap(err, "failed to read data into buffer")
-		}
-		reader, err = maxminddb.FromBytes(buf)
-		if err != nil {
-			return errors.Wrap(err, "failed to create maxmind reader from bytes")
-		}
-	} else {
-		// Write to file
-		tmpPath := r.DBPath + ".tmp"
-		out, err := os.Create(tmpPath)
-		if err != nil {
-			return errors.Wrap(err, "failed to create temporary file")
-		}
-		if _, err := io.CopyN(out, data, size); err != nil {
-			out.Close()
-			return errors.Wrap(err, "failed to copy data to temporary file")
-		}
-		out.Close()
+		return r.createInMemoryReader(data, size)
+	}
+	return r.createFileReader(data, size)
+}
 
-		reader, err = maxminddb.Open(tmpPath)
-		if err != nil {
-			return errors.Wrap(err, "failed to open maxmind reader from file")
-		}
-		if err := os.Rename(tmpPath, r.DBPath); err != nil {
-			return errors.Wrap(err, "failed to rename temporary file to final path")
-		}
+func (r *RemoteFetcher) createInMemoryReader(data io.Reader, size int64) (*maxminddb.Reader, error) {
+	buf := make([]byte, size)
+	_, err := io.ReadFull(data, buf)
+	if err != nil {
+		metrics.FetchErrorsTotal.WithLabelValues("memory_read").Inc()
+		return nil, errors.Wrap(err, "failed to read data into buffer")
 	}
 
+	reader, err := maxminddb.FromBytes(buf)
+	if err != nil {
+		metrics.FetchErrorsTotal.WithLabelValues("maxmind_reader_creation").Inc()
+		return nil, errors.Wrap(err, "failed to create maxmind reader from bytes")
+	}
+
+	return reader, nil
+}
+
+func (r *RemoteFetcher) createFileReader(data io.Reader, size int64) (*maxminddb.Reader, error) {
+	// Write to temporary file
+	out, tmpPath, err := utils.CreateTempFile(r.DBPath)
+	if err != nil {
+		metrics.FetchErrorsTotal.WithLabelValues("file_creation").Inc()
+		return nil, err
+	}
+	defer out.Close()
+
+	if _, err := io.CopyN(out, data, size); err != nil {
+		metrics.FetchErrorsTotal.WithLabelValues("file_write").Inc()
+		return nil, errors.Wrap(err, "failed to copy data to temporary file")
+	}
+
+	// Create reader from temporary file
+	reader, err := maxminddb.Open(tmpPath)
+	if err != nil {
+		metrics.FetchErrorsTotal.WithLabelValues("maxmind_reader_creation").Inc()
+		return nil, errors.Wrap(err, "failed to open maxmind reader from file")
+	}
+
+	// Atomically replace the database file
+	if err := utils.AtomicReplaceFile(tmpPath, r.DBPath); err != nil {
+		reader.Close()
+		metrics.FetchErrorsTotal.WithLabelValues("file_rename").Inc()
+		return nil, err
+	}
+
+	return reader, nil
+}
+
+func (r *RemoteFetcher) updateReaderState(reader *maxminddb.Reader, size int64) error {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
+
+	// Close previous reader
 	if r.reader != nil {
 		if err := r.reader.Close(); err != nil {
 			log.Error().Err(err).Msg("failed to close previous reader")
 		}
 	}
+
+	// Validate new reader
+	var testResult any
+	if err := reader.Lookup(net.ParseIP("8.8.8.8"), &testResult); err != nil {
+		reader.Close()
+		return errors.Wrap(err, "database validation failed")
+	}
+
+	// Update state
 	r.reader = reader
 	r.ready = true
+
+	// Track successful fetch
+	metrics.FetchSuccessTotal.Inc()
+
+	log.Info().
+		Str("endpoint", "maxmind").
+		Int64("size_bytes", size).
+		Msg("database fetch completed successfully")
+
 	return nil
 }
 
-func extractFileFromTar(tr *tar.Reader, target string) (io.Reader, int64, error) {
-	for {
-		header, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return nil, 0, err
-		}
-
-		if header.Typeflag != tar.TypeReg {
+func (r *RemoteFetcher) fetchWithRetry() error {
+	maxRetries := 3
+	for i := range maxRetries {
+		if err := r.fetch(); err != nil {
+			if i == maxRetries-1 {
+				return err
+			}
+			backoff := time.Duration(i+1) * time.Second
+			time.Sleep(backoff)
 			continue
 		}
-
-		if strings.Contains(header.Name, target) {
-			// Wrap in a LimitedReader to avoid reading beyond the file size
-			return io.LimitReader(tr, header.Size), header.Size, nil
-		}
+		return nil
 	}
-	return nil, 0, fmt.Errorf("file %s not found in archive", target)
+	return fmt.Errorf("max retries exceeded")
 }

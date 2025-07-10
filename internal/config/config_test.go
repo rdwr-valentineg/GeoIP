@@ -49,6 +49,14 @@ func TestValidate(t *testing.T) {
 			},
 			wantErr: "invalid port value, must be between 1 and 65536",
 		},
+		"missing ip header": {
+			config: &config{
+				DbPath:           "test.db",
+				Port:             8080,
+				CachePurgePeriod: 10,
+			},
+			wantErr: "source IP header cannot be empty",
+		},
 		"missing cache purge period": {
 			config: &config{
 				DbPath:   "test.db",
@@ -66,6 +74,18 @@ func TestValidate(t *testing.T) {
 				MaxMindLicenseKey: "valid-key",
 			},
 			wantErr: "when maxmind license key provided, maxmind account id is required",
+		},
+		"good maxmind license key but no fetch interval": {
+			config: &config{
+				DbPath:               "test.db",
+				Port:                 8080,
+				IpHeader:             "some-header",
+				MaxMindFetchInterval: 0,
+				CachePurgePeriod:     10,
+				MaxMindLicenseKey:    "valid-key",
+				MaxMindAccountId:     "valid-id",
+			},
+			wantErr: "maxmind fetch interval must be greater than zero",
 		},
 	}
 
@@ -157,6 +177,16 @@ func TestInitConfig(t *testing.T) {
 					return errors.New("unexpected MaxMindFetchInterval, expected [1h]")
 				}
 				return nil
+			},
+		},
+		"duplicate init": {
+			args: []string{
+				"cmd",
+				"-db=test.db",
+			},
+			wantErr: false,
+			wantCheck: func(cfg *config) error {
+				return InitConfig()
 			},
 		},
 		"invalid port": {

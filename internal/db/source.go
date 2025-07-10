@@ -6,11 +6,19 @@ import (
 
 // GeoIPSource abstracts a GeoIP database source.
 type GeoIPSource interface {
+	Fetcher
+	DatabaseProvider
+}
+
+type Fetcher interface {
 	Start() error
 	Stop() error
-	GetReader() ReaderInterface
 	IsReady() bool
 	Reload() error
+}
+
+type DatabaseProvider interface {
+	GetReader() ReaderInterface
 }
 
 type ReaderInterface interface {

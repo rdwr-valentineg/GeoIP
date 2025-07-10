@@ -2,11 +2,8 @@ package main
 
 import (
 	"context"
-	"net"
-	"net/http"
 	"os"
 	"os/signal"
-	"sync"
 	"syscall"
 	"time"
 
@@ -18,36 +15,16 @@ import (
 )
 
 type (
-	cacheEntry struct {
-		allowed bool
-		country string
-	}
 	AuthResponse struct {
 		Message string `json:"message,omitempty"`
 	}
 )
 
-var (
-	geoCache = make(map[string]cacheEntry)
-	cacheMux = sync.RWMutex{}
-
-	excludeSubnets   []*net.IPNet
-	allowedCountries = map[string]bool{}
-)
-
-func respondAllowed(w http.ResponseWriter, isoCode string) {
-	w.Header().Set("X-Country", isoCode)
-	w.WriteHeader(http.StatusOK)
-}
-
 func clearCachePeriodically(interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	go func() {
 		for range ticker.C {
-			cacheMux.Lock()
-			evicted := len(geoCache)
-			geoCache = make(map[string]cacheEntry)
-			cacheMux.Unlock()
+			evicted := webserver.CacheCleanup()
 			metrics.CacheEvictions.Add(float64(evicted))
 			log.Info().Int("evicted entries", evicted).Msg("Cache cleared")
 		}
@@ -66,7 +43,12 @@ func main() {
 	switch {
 	case config.GetMaxMindLicenseKey() != "":
 		log.Debug().Msg("Using MaxMind remote fetcher")
-		source = db.NewRemoteFetcher()
+		source = db.NewRemoteFetcher(db.Config{
+			AccountID:  config.GetMaxMindAccountId(),
+			LicenseKey: config.GetMaxMindLicenseKey(),
+			DBPath:     config.GetDbPath(),
+			Interval:   config.GetMaxMindFetchInterval(),
+		})
 	case config.GetDbPath() != "":
 		log.Debug().Msg("Using MaxMind local fetcher")
 		source = db.NewDiskLoader(config.GetDbPath())
