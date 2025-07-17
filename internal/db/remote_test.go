@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -28,10 +29,12 @@ func init() {
 
 type (
 	testServer struct {
-		server    *httptest.Server
-		oldURL    string
-		client    *http.Client
-		responses []testResponse
+		server        *httptest.Server
+		oldURL        string
+		client        *http.Client
+		responses     []testResponse
+		responseIndex int
+		mutex         sync.Mutex
 	}
 
 	testResponse struct {
@@ -54,14 +57,16 @@ func newTestServer(responses ...testResponse) *testServer {
 		responses: responses,
 	}
 
-	responseIndex := 0
 	ts.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if responseIndex >= len(ts.responses) {
-			responseIndex = len(ts.responses) - 1 // Use last response
+		ts.mutex.Lock()
+		defer ts.mutex.Unlock()
+
+		if ts.responseIndex >= len(ts.responses) {
+			ts.responseIndex = len(ts.responses) - 1 // Use last response
 		}
 
-		resp := ts.responses[responseIndex]
-		responseIndex++
+		resp := ts.responses[ts.responseIndex]
+		ts.responseIndex++
 
 		// Set headers
 		for key, value := range resp.headers {
@@ -73,9 +78,6 @@ func newTestServer(responses ...testResponse) *testServer {
 			w.Write(resp.body)
 		}
 	}))
-
-	ts.oldURL = maxmindBaseURL
-	maxmindBaseURL = ts.server.URL
 	ts.client = ts.server.Client()
 
 	return ts
@@ -102,6 +104,7 @@ func newTestRemoteFetcher(client HTTPClient, inMemory bool, dbPath string) *Remo
 		DBPath:    dbPath,
 		Interval:  time.Hour,
 		Client:    client,
+		URL:       maxmindBaseURL, // Use the global test URL
 		inMemory:  inMemory,
 	}
 }
@@ -175,9 +178,14 @@ func TestRemoteFetcher_LoadsToMemory(t *testing.T) {
 		statusCode: http.StatusOK,
 		body:       archive,
 	})
-	defer server.close()
+	origURL := maxmindBaseURL
+	defer func() {
+		maxmindBaseURL = origURL
+		server.close()
+	}()
 
 	remote := newTestRemoteFetcher(server.client, true, "")
+	remote.URL = server.server.URL
 
 	if err := remote.fetch(); err != nil {
 		t.Fatalf("fetch failed: %v", err)
@@ -198,9 +206,14 @@ func TestRemoteFetcher_downloadArchive_Success(t *testing.T) {
 		statusCode: http.StatusOK,
 		body:       archive,
 	})
-	defer server.close()
+	origURL := maxmindBaseURL
+	defer func() {
+		maxmindBaseURL = origURL
+		server.close()
+	}()
 
 	rf := newTestRemoteFetcher(server.client, true, "")
+	rf.URL = server.server.URL
 
 	resp, err := rf.downloadArchive()
 	if err != nil {
@@ -218,9 +231,14 @@ func TestRemoteFetcher_downloadArchive_BadStatus(t *testing.T) {
 		statusCode: http.StatusForbidden,
 		body:       []byte("forbidden"),
 	})
-	defer server.close()
+	origURL := maxmindBaseURL
+	defer func() {
+		maxmindBaseURL = origURL
+		server.close()
+	}()
 
 	rf := newTestRemoteFetcher(server.client, true, "")
+	rf.URL = server.server.URL
 
 	_, err := rf.downloadArchive()
 	if err == nil {
@@ -249,9 +267,14 @@ func TestRemoteFetcher_downloadAndExtractDB_Success(t *testing.T) {
 		statusCode: http.StatusOK,
 		body:       archive,
 	})
-	defer server.close()
+	origURL := maxmindBaseURL
+	defer func() {
+		maxmindBaseURL = origURL
+		server.close()
+	}()
 
 	rf := newTestRemoteFetcher(server.client, true, "")
+	rf.URL = server.server.URL
 
 	data, size, err := rf.downloadAndExtractDB()
 	if err != nil {
@@ -328,9 +351,14 @@ func TestRemoteFetcher_fetch_InMemory_Success(t *testing.T) {
 		statusCode: http.StatusOK,
 		body:       archive,
 	})
-	defer server.close()
+	origURL := maxmindBaseURL
+	defer func() {
+		maxmindBaseURL = origURL
+		server.close()
+	}()
 
 	rf := newTestRemoteFetcher(server.client, true, "")
+	rf.URL = server.server.URL
 
 	err := rf.fetch()
 	if err != nil {
@@ -349,9 +377,14 @@ func TestRemoteFetcher_fetch_InMemory_BadStatus(t *testing.T) {
 		statusCode: http.StatusForbidden,
 		body:       []byte("fail"),
 	})
-	defer server.close()
+	origURL := maxmindBaseURL
+	defer func() {
+		maxmindBaseURL = origURL
+		server.close()
+	}()
 
 	rf := newTestRemoteFetcher(server.client, true, "")
+	rf.URL = server.server.URL
 
 	err := rf.fetch()
 	if err == nil || !strings.Contains(err.Error(), "bad response") {
@@ -364,9 +397,14 @@ func TestRemoteFetcher_fetch_InMemory_InvalidGzip(t *testing.T) {
 		statusCode: http.StatusOK,
 		body:       []byte("not a gzip"),
 	})
-	defer server.close()
+	origURL := maxmindBaseURL
+	defer func() {
+		maxmindBaseURL = origURL
+		server.close()
+	}()
 
 	rf := newTestRemoteFetcher(server.client, true, "")
+	rf.URL = server.server.URL
 
 	err := rf.fetch()
 	if err == nil || !strings.Contains(err.Error(), "failed to create gzip reader") {
@@ -383,9 +421,14 @@ func TestRemoteFetcher_fetch_InMemory_MissingFileInTar(t *testing.T) {
 		statusCode: http.StatusOK,
 		body:       arch,
 	})
-	defer server.close()
+	origURL := maxmindBaseURL
+	defer func() {
+		maxmindBaseURL = origURL
+		server.close()
+	}()
 
 	rf := newTestRemoteFetcher(server.client, true, "")
+	rf.URL = server.server.URL
 
 	err = rf.fetch()
 	if err == nil || !strings.Contains(err.Error(), "failed to extract GeoLite2-Country.mmdb from tar") {
@@ -402,9 +445,14 @@ func TestRemoteFetcher_fetch_InMemory_InvalidMMDB(t *testing.T) {
 		statusCode: http.StatusOK,
 		body:       arch,
 	})
-	defer server.close()
+	origURL := maxmindBaseURL
+	defer func() {
+		maxmindBaseURL = origURL
+		server.close()
+	}()
 
 	rf := newTestRemoteFetcher(server.client, true, "")
+	rf.URL = server.server.URL
 
 	err = rf.fetch()
 	if err == nil || !strings.Contains(err.Error(), "failed to create maxmind reader from bytes") {
@@ -424,9 +472,14 @@ func TestRemoteFetcher_fetch_SizeLimit(t *testing.T) {
 		statusCode: http.StatusOK,
 		body:       arch,
 	})
-	defer server.close()
+	origURL := maxmindBaseURL
+	defer func() {
+		maxmindBaseURL = origURL
+		server.close()
+	}()
 
 	rf := newTestRemoteFetcher(server.client, true, "")
+	rf.URL = server.server.URL
 
 	err = rf.fetch()
 	if err == nil || !strings.Contains(err.Error(), "database too large") {
@@ -434,53 +487,93 @@ func TestRemoteFetcher_fetch_SizeLimit(t *testing.T) {
 	}
 }
 
-func TestRemoteFetcher_fetchWithRetry_Success(t *testing.T) {
+func TestRemoteFetcher(t *testing.T) {
 	archive := newValidMMDBArchive(t)
-	server := newTestServer(testResponse{
-		statusCode: http.StatusOK,
-		body:       archive,
-	})
-	defer server.close()
-
-	rf := newTestRemoteFetcher(server.client, true, "")
-
-	err := rf.fetchWithRetry()
-	if err != nil {
-		t.Fatalf("fetchWithRetry failed: %v", err)
+	tests := []struct {
+		name        string
+		server      *testServer
+		expectedErr string
+	}{
+		{
+			name: "Immediate Success",
+			server: newTestServer(testResponse{
+				statusCode: http.StatusOK,
+				body:       archive,
+			}),
+		}, {
+			name: "Retry Success",
+			server: newTestServer(
+				testResponse{statusCode: http.StatusInternalServerError, body: []byte("error")},
+				testResponse{statusCode: http.StatusInternalServerError, body: []byte("error")},
+				testResponse{statusCode: http.StatusOK, body: archive},
+			),
+		}, {
+			name:        "Retry Failure",
+			expectedErr: "max retries exceeded",
+			server: newTestServer(
+				testResponse{statusCode: http.StatusInternalServerError, body: []byte("error")},
+				testResponse{statusCode: http.StatusInternalServerError, body: []byte("error")},
+				testResponse{statusCode: http.StatusInternalServerError, body: []byte("error")},
+				testResponse{statusCode: http.StatusInternalServerError, body: []byte("error")},
+			),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			origURL := maxmindBaseURL
+			defer func() {
+				maxmindBaseURL = origURL
+				tc.server.close()
+			}()
+			rf := newTestRemoteFetcher(tc.server.client, true, "")
+			rf.URL = tc.server.server.URL // Use the test server URL
+			// For this test, we still want fast execution
+			err := rf.fetchWithRetry()
+			if tc.expectedErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.expectedErr) {
+					t.Errorf("expected error '%s', got %+v", tc.expectedErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("fetchWithRetry failed: %v", err)
+			}
+		})
 	}
 }
 
-func TestRemoteFetcher_fetchWithRetry_EventualSuccess(t *testing.T) {
+func TestRemoteFetcher_fetchWithRetry_RealTiming(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping timing test in short mode")
+	}
+
 	archive := newValidMMDBArchive(t)
 	server := newTestServer(
-		testResponse{statusCode: http.StatusInternalServerError, body: []byte("error")},
 		testResponse{statusCode: http.StatusInternalServerError, body: []byte("error")},
 		testResponse{statusCode: http.StatusOK, body: archive},
 	)
-	defer server.close()
+	origURL := maxmindBaseURL
+	defer func() {
+		maxmindBaseURL = origURL
+		server.close()
+	}()
 
 	rf := newTestRemoteFetcher(server.client, true, "")
+	rf.URL = server.server.URL
 
+	rf.BaseBackoff = time.Second // Use real sleep for this test
+
+	start := time.Now()
 	err := rf.fetchWithRetry()
+	duration := time.Since(start)
+
 	if err != nil {
 		t.Fatalf("fetchWithRetry should succeed after retries: %v", err)
 	}
-}
 
-func TestRemoteFetcher_fetchWithRetry_MaxRetriesExceeded(t *testing.T) {
-	server := newTestServer(
-		testResponse{statusCode: http.StatusInternalServerError, body: []byte("error")},
-		testResponse{statusCode: http.StatusInternalServerError, body: []byte("error")},
-		testResponse{statusCode: http.StatusInternalServerError, body: []byte("error")},
-		testResponse{statusCode: http.StatusInternalServerError, body: []byte("error")},
-	)
-	defer server.close()
-
-	rf := newTestRemoteFetcher(server.client, true, "")
-
-	err := rf.fetchWithRetry()
-	if err == nil {
-		t.Fatal("fetchWithRetry should fail after max retries")
+	// Should take at least 1 second (first retry delay)
+	if duration < time.Second {
+		t.Errorf("expected at least 1 second delay, got %v", duration)
 	}
 }
 
@@ -490,9 +583,14 @@ func TestRemoteFetcher_Reload(t *testing.T) {
 		statusCode: http.StatusOK,
 		body:       archive,
 	})
-	defer server.close()
+	origURL := maxmindBaseURL
+	defer func() {
+		maxmindBaseURL = origURL
+		server.close()
+	}()
 
 	rf := newTestRemoteFetcher(server.client, true, "")
+	rf.URL = server.server.URL
 
 	err := rf.Reload()
 	if err != nil {
@@ -518,22 +616,25 @@ func TestRemoteFetcher_IsReady(t *testing.T) {
 }
 
 func TestRemoteFetcher_GetReader(t *testing.T) {
-	rf := newTestRemoteFetcher(nil, true, "")
-
-	// Initially not ready, so IsReady should be false
-	if rf.IsReady() {
-		t.Error("expected not ready before fetch")
-	}
-
 	// After setting up a valid reader through fetch
 	archive := newValidMMDBArchive(t)
 	server := newTestServer(testResponse{
 		statusCode: http.StatusOK,
 		body:       archive,
 	})
-	defer server.close()
+	origURL := maxmindBaseURL
+	defer func() {
+		maxmindBaseURL = origURL
+		server.close()
+	}()
 
-	rf.Client = server.client
+	rf := newTestRemoteFetcher(server.client, true, "")
+	rf.URL = server.server.URL
+	// Initially not ready, so IsReady should be false
+	if rf.IsReady() {
+		t.Error("expected not ready before fetch")
+	}
+
 	if err := rf.fetch(); err != nil {
 		t.Fatalf("fetch failed: %v", err)
 	}
@@ -561,9 +662,13 @@ func TestRemoteFetcher_Integration_Success(t *testing.T) {
 		statusCode: http.StatusOK,
 		body:       archive,
 	})
-	defer server.close()
-
+	origURL := maxmindBaseURL
+	defer func() {
+		maxmindBaseURL = origURL
+		server.close()
+	}()
 	rf := newTestRemoteFetcher(server.client, true, "")
+	rf.URL = server.server.URL
 
 	// Initial state - reader should be nil initially
 	if rf.IsReady() {

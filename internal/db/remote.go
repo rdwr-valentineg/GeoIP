@@ -21,15 +21,17 @@ import (
 
 type (
 	RemoteFetcher struct {
-		BasicAuth string
-		DBPath    string // optional
-		Interval  time.Duration
-		Client    HTTPClient
-		mutex     sync.RWMutex
-		reader    *maxminddb.Reader
-		ready     bool
-		done      chan struct{}
-		inMemory  bool
+		BasicAuth   string
+		DBPath      string // optional
+		Interval    time.Duration
+		Client      HTTPClient
+		URL         string
+		BaseBackoff time.Duration
+		mutex       sync.RWMutex
+		reader      *maxminddb.Reader
+		ready       bool
+		done        chan struct{}
+		inMemory    bool
 	}
 
 	HTTPClient interface {
@@ -57,9 +59,11 @@ func NewRemoteFetcher(cfg Config) *RemoteFetcher {
 	b64Auth := base64.StdEncoding.EncodeToString([]byte(auth))
 	dbPath := cfg.DBPath
 	return &RemoteFetcher{
-		BasicAuth: "Basic " + b64Auth,
-		DBPath:    dbPath,
-		Interval:  cfg.Interval,
+		BasicAuth:   "Basic " + b64Auth,
+		DBPath:      dbPath,
+		Interval:    cfg.Interval,
+		URL:         maxmindBaseURL, // Use configurable URL
+		BaseBackoff: time.Second,
 		Client: &http.Client{
 			Timeout: 30 * time.Second,
 			Transport: &http.Transport{
@@ -184,7 +188,7 @@ func (r *RemoteFetcher) downloadArchive() (*http.Response, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, "GET", maxmindBaseURL, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", r.URL, nil)
 	if err != nil {
 		metrics.FetchErrorsTotal.WithLabelValues("http_request_creation").Inc()
 		return nil, errors.Wrap(err, "failed to create request")
@@ -297,16 +301,16 @@ func (r *RemoteFetcher) updateReaderState(reader *maxminddb.Reader, size int64) 
 
 func (r *RemoteFetcher) fetchWithRetry() error {
 	maxRetries := 3
+	var err error
 	for i := range maxRetries {
-		if err := r.fetch(); err != nil {
-			if i == maxRetries-1 {
-				return err
-			}
-			backoff := time.Duration(i+1) * time.Second
-			time.Sleep(backoff)
+		if err = r.fetch(); err != nil {
+			log.Error().
+				Err(err).
+				Msg("database fetch failed")
+			time.Sleep(r.BaseBackoff * time.Duration(i+1))
 			continue
 		}
 		return nil
 	}
-	return fmt.Errorf("max retries exceeded")
+	return errors.Wrap(err, "max retries exceeded")
 }
