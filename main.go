@@ -65,16 +65,24 @@ func main() {
 
 	metrics.InitMetrics()
 	clearCachePeriodically(config.GetCachePurgePeriod())
-	s, err := webserver.Run(source)
+	errCh := make(chan error, 1)
+	s := webserver.Run(source, errCh)
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to start web server")
 	}
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
-	<-quit
-
-	log.Info().Msg("Shutting down server...")
+	select {
+	case <-quit:
+		log.Info().Msg("Shutting down server...")
+	case err := <-errCh:
+		if err != nil {
+			log.Error().Err(err).Msg("Server error")
+			return
+		}
+		log.Error().Err(err).Msg("Server error")
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

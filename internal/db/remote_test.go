@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/maxmind/mmdbwriter"
 	"github.com/maxmind/mmdbwriter/mmdbtype"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/rdwr-valentineg/GeoIP/internal/metrics"
 )
 
@@ -46,8 +48,25 @@ type (
 		err error
 		res *http.Response
 	}
+
+	mockGeoIPReader struct {
+		lookup func(ip net.IP, record any) error
+		close  func() error
+	}
+	badReader struct {
+		io.Reader
+	}
 )
 
+func (_ *badReader) Read(_ []byte) (int, error) {
+	return 0, fmt.Errorf("bad reader")
+}
+func (m mockGeoIPReader) Lookup(ip net.IP, record any) error {
+	return m.lookup(ip, record)
+}
+func (m mockGeoIPReader) Close() error {
+	return m.close()
+}
 func (m *mockClient) Do(_ *http.Request) (*http.Response, error) {
 	return m.res, m.err
 }
@@ -289,27 +308,44 @@ func TestRemoteFetcher_downloadAndExtractDB_Success(t *testing.T) {
 	}
 }
 
-func TestRemoteFetcher_createInMemoryReader_Success(t *testing.T) {
+func TestRemoteFetcher_createInMemoryReader(t *testing.T) {
 	mockDB := mustMockValidMMDB(t)
 	rf := newTestRemoteFetcher(nil, true, "")
-
-	reader, err := rf.createInMemoryReader(bytes.NewReader(mockDB), int64(len(mockDB)))
-	if err != nil {
-		t.Fatalf("createInMemoryReader failed: %v", err)
+	tests := []struct {
+		name        string
+		reader      io.Reader
+		expectedErr string
+		size        int64
+	}{
+		{
+			name:   "Valid MMDB",
+			reader: bytes.NewReader(mockDB),
+			size:   int64(len(mockDB)),
+		}, {
+			name:        "Invalid Reader",
+			reader:      strings.NewReader("invalid mmdb"),
+			expectedErr: "invalid MaxMind DB file",
+		}, {
+			name:        "broken reader",
+			reader:      &badReader{},
+			expectedErr: "invalid MaxMind DB file",
+		},
 	}
-	defer reader.Close()
-
-	if reader == nil {
-		t.Error("expected non-nil reader")
-	}
-}
-
-func TestRemoteFetcher_createInMemoryReader_InvalidData(t *testing.T) {
-	rf := newTestRemoteFetcher(nil, true, "")
-
-	_, err := rf.createInMemoryReader(strings.NewReader("invalid mmdb"), 12)
-	if err == nil {
-		t.Fatal("expected error for invalid mmdb data")
+	for _, tc := range tests {
+		reader, err := rf.createInMemoryReader(tc.reader, tc.size)
+		if tc.expectedErr != "" {
+			if err == nil || !strings.Contains(err.Error(), tc.expectedErr) {
+				t.Fatalf("createInMemoryReader expected err: %s, got: %v", tc.expectedErr, err)
+			}
+			return
+		}
+		if err != nil {
+			t.Fatalf("createInMemoryReader failed: %v", err)
+		}
+		defer reader.Close()
+		if reader == nil {
+			t.Error("expected non-nil reader")
+		}
 	}
 }
 
@@ -526,6 +562,7 @@ func TestRemoteFetcher(t *testing.T) {
 				tc.server.close()
 			}()
 			rf := newTestRemoteFetcher(tc.server.client, true, "")
+
 			rf.URL = tc.server.server.URL // Use the test server URL
 			// For this test, we still want fast execution
 			err := rf.fetchWithRetry()
@@ -692,6 +729,167 @@ func TestRemoteFetcher_Integration_Success(t *testing.T) {
 	var result interface{}
 	if err := reader.Lookup(net.ParseIP("1.2.3.4"), &result); err != nil {
 		t.Errorf("lookup failed: %v", err)
+	}
+}
+
+func TestRemoteFetcher_periodicFetch(t *testing.T) {
+	tests := []struct {
+		name       string
+		server     *testServer
+		validation func(*testing.T, float64)
+	}{
+		{
+			name: "Valid MMDB Archive",
+			server: newTestServer(testResponse{
+				statusCode: http.StatusOK,
+				body:       newValidMMDBArchive(t),
+			}),
+			validation: func(t *testing.T, initMetric float64) {
+				metric, err := metrics.FetchAttemptsTotal.GetMetricWithLabelValues("maxmind")
+				if err != nil {
+					t.Fatalf("failed to get metric: %v", err)
+				}
+				currMetric := testutil.ToFloat64(metric)
+				if initMetric >= currMetric {
+					t.Errorf("init: %f, curr: %f - expected fetch attempts to increase", initMetric, currMetric)
+				}
+			},
+		}, {
+			name: "Multiple Retries",
+			server: newTestServer(
+				testResponse{statusCode: http.StatusInternalServerError, body: []byte("error")},
+				testResponse{statusCode: http.StatusInternalServerError, body: []byte("error")},
+				testResponse{statusCode: http.StatusOK, body: newValidMMDBArchive(t)},
+			),
+			validation: func(t *testing.T, initMetric float64) {
+				metric, err := metrics.FetchAttemptsTotal.GetMetricWithLabelValues("maxmind")
+				if err != nil {
+					t.Fatalf("failed to get metric: %v", err)
+				}
+				currMetric := testutil.ToFloat64(metric)
+				if initMetric >= currMetric {
+					t.Errorf("init: %f, curr: %f - expected fetch attempts to increase after retries", initMetric, currMetric)
+				}
+			},
+		}, {
+			name: "Max Retries Exceeded",
+			server: newTestServer(
+				testResponse{statusCode: http.StatusInternalServerError, body: []byte("error")},
+				testResponse{statusCode: http.StatusInternalServerError, body: []byte("error")},
+				testResponse{statusCode: http.StatusInternalServerError, body: []byte("error")},
+				testResponse{statusCode: http.StatusInternalServerError, body: []byte("error")},
+			),
+			validation: func(t *testing.T, initMetric float64) {
+				metric, err := metrics.FetchAttemptsTotal.GetMetricWithLabelValues("maxmind")
+				if err != nil {
+					t.Fatalf("failed to get metric: %v", err)
+				}
+				currMetric := testutil.ToFloat64(metric)
+				if initMetric >= currMetric {
+					t.Errorf("init: %f, curr: %f - expected fetch attempts to increase after max retries", initMetric, currMetric)
+				}
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				tc.server.close()
+			}()
+			rf := newTestRemoteFetcher(tc.server.client, true, "")
+			rf.URL = tc.server.server.URL
+			rf.Interval = 10 * time.Millisecond // fast ticker for test
+
+			rf.done = make(chan struct{})
+			metric, err := metrics.FetchAttemptsTotal.GetMetricWithLabelValues("maxmind")
+			if err != nil {
+				t.Fatalf("failed to get metric: %v", err)
+			}
+			initMetric := testutil.ToFloat64(metric)
+
+			go rf.periodicFetch()
+			time.Sleep(50 * time.Millisecond)
+			close(rf.done)
+			time.Sleep(20 * time.Millisecond) // allow goroutine to exit
+			tc.validation(t, initMetric)
+		})
+	}
+}
+
+func TestUpdateReaderState(t *testing.T) {
+	srv := newTestServer(testResponse{
+		statusCode: http.StatusOK,
+		body:       newValidMMDBArchive(t),
+	})
+	tests := []struct {
+		name        string
+		reader      *mockGeoIPReader
+		rf          *RemoteFetcher
+		expectedErr string
+	}{
+		{
+			name: "initial close error",
+			reader: &mockGeoIPReader{
+				lookup: func(ip net.IP, record any) error {
+					return nil
+				},
+				close: func() error {
+					return fmt.Errorf("mock close error")
+				},
+			},
+			rf: &RemoteFetcher{
+				BasicAuth: "Basic test-auth",
+				DBPath:    "",
+				Interval:  time.Hour,
+				Client:    srv.client,
+				URL:       srv.server.URL,
+				inMemory:  true,
+				reader: &mockGeoIPReader{
+					close: func() error {
+						return fmt.Errorf("mock close error")
+					},
+				},
+			},
+			expectedErr: "", //Currently only logs the error, doesn't return it
+		}, {
+			name: "Lookup error",
+			reader: &mockGeoIPReader{
+				lookup: func(ip net.IP, record any) error {
+					return fmt.Errorf("mock lookup error")
+				},
+				close: func() error {
+					return nil
+				},
+			},
+			rf: &RemoteFetcher{
+				BasicAuth: "Basic test-auth",
+				DBPath:    "",
+				Interval:  time.Hour,
+				Client:    srv.client,
+				URL:       srv.server.URL,
+				inMemory:  true,
+				reader: &mockGeoIPReader{
+					close: func() error {
+						return fmt.Errorf("mock close error")
+					},
+				},
+			},
+			expectedErr: "database validation failed",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.rf.updateReaderState(tc.reader, 0)
+			if tc.expectedErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.expectedErr) {
+					t.Errorf("expected error '%s', got %v", tc.expectedErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("updateReaderState failed: %v", err)
+			}
+		})
 	}
 }
 

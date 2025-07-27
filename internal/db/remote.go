@@ -28,7 +28,7 @@ type (
 		URL         string
 		BaseBackoff time.Duration
 		mutex       sync.RWMutex
-		reader      *maxminddb.Reader
+		reader      ReaderInterface
 		ready       bool
 		done        chan struct{}
 		inMemory    bool
@@ -77,10 +77,6 @@ func NewRemoteFetcher(cfg Config) *RemoteFetcher {
 }
 
 func (r *RemoteFetcher) Start() error {
-	if r.BasicAuth == "" {
-		return fmt.Errorf("auth info is required")
-	}
-
 	r.done = make(chan struct{})
 	go r.periodicFetch()
 	return nil
@@ -135,26 +131,33 @@ func (r *RemoteFetcher) fetch() error {
 	// Download and extract database
 	data, size, err := r.downloadAndExtractDB()
 	if err != nil {
+		fmt.Printf("Failed to download and extract DB: %v\n", err)
+		metrics.FetchErrorsTotal.WithLabelValues("download_and_extract").Inc()
 		return err
 	}
 
 	// Validate size
 	if size > maxDBSize {
 		metrics.FetchErrorsTotal.WithLabelValues("size_validation").Inc()
+		fmt.Printf("Failed to download and extract DB max size exceeded: %d bytes\n", size)
 		return fmt.Errorf("database too large: %d bytes", size)
 	}
 
 	// Create reader from data
 	reader, err := r.createReader(data, size)
 	if err != nil {
+		metrics.FetchErrorsTotal.WithLabelValues("reader_creation").Inc()
+		fmt.Printf("Failed to create reader: %v\n", err)
 		return err
 	}
 
 	// Update the fetcher state
 	if err := r.updateReaderState(reader, size); err != nil {
+		metrics.FetchErrorsTotal.WithLabelValues("reader_state_update").Inc()
+		fmt.Printf("Failed to update reader state: %v\n", err)
 		return err
 	}
-
+	fmt.Printf("Database fetch completed successfully, size: %d bytes\n", size)
 	return nil
 }
 
@@ -211,14 +214,14 @@ func (r *RemoteFetcher) downloadArchive() (*http.Response, error) {
 	return resp, nil
 }
 
-func (r *RemoteFetcher) createReader(data io.Reader, size int64) (*maxminddb.Reader, error) {
+func (r *RemoteFetcher) createReader(data io.Reader, size int64) (ReaderInterface, error) {
 	if r.inMemory {
 		return r.createInMemoryReader(data, size)
 	}
 	return r.createFileReader(data, size)
 }
 
-func (r *RemoteFetcher) createInMemoryReader(data io.Reader, size int64) (*maxminddb.Reader, error) {
+func (r *RemoteFetcher) createInMemoryReader(data io.Reader, size int64) (ReaderInterface, error) {
 	buf := make([]byte, size)
 	_, err := io.ReadFull(data, buf)
 	if err != nil {
@@ -235,7 +238,7 @@ func (r *RemoteFetcher) createInMemoryReader(data io.Reader, size int64) (*maxmi
 	return reader, nil
 }
 
-func (r *RemoteFetcher) createFileReader(data io.Reader, size int64) (*maxminddb.Reader, error) {
+func (r *RemoteFetcher) createFileReader(data io.Reader, size int64) (ReaderInterface, error) {
 	// Write to temporary file
 	out, tmpPath, err := utils.CreateTempFile(r.DBPath)
 	if err != nil {
@@ -266,13 +269,15 @@ func (r *RemoteFetcher) createFileReader(data io.Reader, size int64) (*maxminddb
 	return reader, nil
 }
 
-func (r *RemoteFetcher) updateReaderState(reader *maxminddb.Reader, size int64) error {
+func (r *RemoteFetcher) updateReaderState(reader ReaderInterface, size int64) error {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 
 	// Close previous reader
 	if r.reader != nil {
+		fmt.Println("Closing previous reader")
 		if err := r.reader.Close(); err != nil {
+			fmt.Printf("Failed to close previous reader: %v\n", err)
 			log.Error().Err(err).Msg("failed to close previous reader")
 		}
 	}

@@ -14,7 +14,7 @@ type Server struct {
 	Srv *http.Server
 }
 
-func Run(source db.GeoIPSource) (*Server, error) {
+func Run(source db.GeoIPSource, errCh chan error) *Server {
 	mux := http.NewServeMux()
 
 	mux.Handle("/auth", NewAuthHandler(source))
@@ -44,11 +44,16 @@ func Run(source db.GeoIPSource) (*Server, error) {
 	}
 
 	go func() {
+		fmt.Printf("Starting GeoIP server on %s\n", addr)
 		log.Info().Str("addr", addr).Msg("GeoIP server listening")
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatal().Err(err).Msg("HTTP server error")
+			fmt.Printf("HTTP server error: %v\n", err)
+			log.Error().Err(err).Msg("HTTP server error")
+			errCh <- err
+		} else {
+			errCh <- nil
 		}
 	}()
 
-	return &Server{Srv: srv}, nil
+	return &Server{Srv: srv}
 }

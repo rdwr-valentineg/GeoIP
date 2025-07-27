@@ -48,6 +48,7 @@ var (
 		log.Debug().Str("value", r.RemoteAddr).Msg("ip header found not found, using RemoteAddr")
 		host, _, err := net.SplitHostPort(r.RemoteAddr)
 		if err != nil {
+			log.Warn().Err(err).Msg("Failed to parse RemoteAddr")
 			return nil
 		}
 		return net.ParseIP(host)

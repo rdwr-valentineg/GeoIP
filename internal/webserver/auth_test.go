@@ -66,125 +66,119 @@ func resetGlobals() {
 
 // --- Tests ---
 
-func TestServeHTTP_DBNotReady(t *testing.T) {
+func TestServeHTTP(t *testing.T) {
 	metrics.InitMetrics()
-	defer resetGlobals()
-	handler := NewAuthHandler(&mockGeoIPSource{ready: false})
-	req := httptest.NewRequest("GET", "/", nil)
-	w := httptest.NewRecorder()
+	origGetIPFromRequest := getIPFromRequest
+	originalIsExcluded := isExcluded
+	originalServeVerdict := serveVerdict
+	originalRespondAllowed := respondAllowed
 
-	handler.ServeHTTP(w, req)
-
-	if w.Code != http.StatusServiceUnavailable {
-		t.Errorf("Expected status %d, got %d", http.StatusServiceUnavailable, w.Code)
-	}
-	if !strings.Contains(w.Body.String(), "GeoIP DB not ready") {
-		t.Errorf("Expected 'GeoIP DB not ready' message, got: %s", w.Body.String())
-	}
-}
-
-func TestServeHTTP_IPNil(t *testing.T) {
-	metrics.InitMetrics()
-	defer resetGlobals()
-	handler := NewAuthHandler(&mockGeoIPSource{ready: true})
-	getIPFromRequest = func(r *http.Request) net.IP { return nil }
-	req := httptest.NewRequest("GET", "/", nil)
-	w := httptest.NewRecorder()
-
-	handler.ServeHTTP(w, req)
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("Expected status %d, got %d", http.StatusBadRequest, w.Code)
-	}
-	if !strings.Contains(w.Body.String(), "Unable to determine IP") {
-		t.Errorf("Expected 'Unable to determine IP' message, got: %s", w.Body.String())
-	}
-}
-
-func TestServeHTTP_CacheHit(t *testing.T) {
-	metrics.InitMetrics()
-	defer resetGlobals()
+	defer func() {
+		resetGlobals()
+		getIPFromRequest = origGetIPFromRequest
+		isExcluded = originalIsExcluded
+		serveVerdict = originalServeVerdict
+		respondAllowed = originalRespondAllowed
+	}()
 	ip := net.ParseIP("1.2.3.4")
-	geoCache[ip.String()] = cacheEntry{allowed: true, country: "US"}
-	handler := NewAuthHandler(&mockGeoIPSource{ready: true})
-	getIPFromRequest = func(r *http.Request) net.IP { return ip }
+	excludedIp := net.ParseIP("10.0.0.1")
 
-	called := false
-	serveVerdict = func(w http.ResponseWriter, allowed bool, country string) {
-		called = true
-		w.WriteHeader(299)
-		w.Write([]byte("cache hit"))
-	}
-
-	req := httptest.NewRequest("GET", "/", nil)
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-	if !called {
-		t.Error("serveVerdict should have been called for cache hit")
-	}
-	if w.Code != 299 {
-		t.Errorf("Expected status 299, got %d", w.Code)
-	}
-	if !strings.Contains(w.Body.String(), "cache hit") {
-		t.Errorf("Expected 'cache hit' in response body, got: %s", w.Body.String())
-	}
-	if CacheCleanup() != 1 {
-		t.Error("CacheCleanup should have evicted 1 entry")
-	}
-	if len(geoCache) != 0 {
-		t.Error("Cache should be empty after cleanup")
-	}
-}
-
-func TestServeHTTP_ExcludedIP(t *testing.T) {
-	metrics.InitMetrics()
-	defer resetGlobals()
-	ip := net.ParseIP("10.0.0.1")
-	handler := NewAuthHandler(&mockGeoIPSource{ready: true})
-	getIPFromRequest = func(r *http.Request) net.IP { return ip }
-	isExcluded = func(ip net.IP, excluded []*net.IPNet) bool { return true }
-
-	called := false
-	respondAllowed = func(w http.ResponseWriter, country string) {
-		called = true
-		w.WriteHeader(298)
-		w.Write([]byte("excluded"))
-	}
-
-	req := httptest.NewRequest("GET", "/", nil)
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-	if !called {
-		t.Error("respondAllowed should have been called for excluded IP")
-	}
-	if w.Code != 298 {
-		t.Errorf("Expected status 298, got %d", w.Code)
-	}
-	if !strings.Contains(w.Body.String(), "excluded") {
-		t.Errorf("Expected 'excluded' in response body, got: %s", w.Body.String())
-	}
-}
-
-func TestServeHTTP_GeoIPLookupError(t *testing.T) {
-	defer resetGlobals()
-	ip := net.ParseIP("8.8.8.8")
-	handler := NewAuthHandler(&mockGeoIPSource{
-		ready: true,
-		lookup: func(ip net.IP, record any) error {
-			return errors.New("fail")
+	tests := []struct {
+		name             string
+		handler          *mockGeoIPSource
+		getIpFromReqFunc func(r *http.Request) net.IP
+		isExcludedFunc   func(ip net.IP, excluded []*net.IPNet) bool
+		cacheEntries     map[string]cacheEntry
+		expectedStatus   int
+		expectedBody     string
+		expectedCountry  string
+	}{
+		{
+			name:             "DB not ready",
+			handler:          &mockGeoIPSource{ready: false},
+			expectedStatus:   http.StatusServiceUnavailable,
+			getIpFromReqFunc: origGetIPFromRequest,
+			isExcludedFunc:   originalIsExcluded,
+			expectedBody:     "GeoIP DB not ready",
+		}, {
+			name:             "IP is nil",
+			handler:          &mockGeoIPSource{ready: true},
+			getIpFromReqFunc: func(r *http.Request) net.IP { return nil },
+			expectedStatus:   http.StatusBadRequest,
+			isExcludedFunc:   originalIsExcluded,
+			expectedBody:     "Unable to determine IP",
+		}, {
+			name:             "Cache hit",
+			handler:          &mockGeoIPSource{ready: true},
+			getIpFromReqFunc: func(r *http.Request) net.IP { return ip },
+			isExcludedFunc:   originalIsExcluded,
+			cacheEntries:     map[string]cacheEntry{ip.String(): {allowed: true, country: "US"}},
+			expectedStatus:   200,
+			expectedBody:     "",
+			expectedCountry:  "US",
+		}, {
+			name:             "Excluded IP",
+			handler:          &mockGeoIPSource{ready: true},
+			getIpFromReqFunc: func(r *http.Request) net.IP { return excludedIp },
+			isExcludedFunc:   func(ip net.IP, excluded []*net.IPNet) bool { return true },
+			expectedStatus:   200,
+			expectedBody:     "",
+			expectedCountry:  "LAN",
+		}, {
+			name:             "GeoIP lookup error",
+			handler:          &mockGeoIPSource{ready: true, lookup: func(ip net.IP, record any) error { return errors.New("fail") }},
+			getIpFromReqFunc: func(r *http.Request) net.IP { return ip },
+			isExcludedFunc:   originalIsExcluded,
+			expectedStatus:   http.StatusInternalServerError,
+			expectedBody:     "GeoIP lookup failed",
+		}, {
+			name: "Disallowed country",
+			handler: &mockGeoIPSource{
+				ready: true,
+				lookup: func(ip net.IP, record any) error {
+					rec := record.(*geoRecord)
+					rec.Country.ISOCode = "ru"
+					return nil
+				},
+			},
+			getIpFromReqFunc: func(r *http.Request) net.IP { return ip },
+			isExcludedFunc:   originalIsExcluded,
+			expectedStatus:   403,
 		},
-	})
-	getIPFromRequest = func(r *http.Request) net.IP { return ip }
-	isExcluded = func(ip net.IP, excluded []*net.IPNet) bool { return false }
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
 
-	req := httptest.NewRequest("GET", "/", nil)
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-	if w.Code != http.StatusInternalServerError {
-		t.Errorf("Expected status %d, got %d", http.StatusInternalServerError, w.Code)
+			getIPFromRequest = tc.getIpFromReqFunc
+			isExcluded = tc.isExcludedFunc
+
+			if len(tc.cacheEntries) > 0 {
+				cacheMux.Lock()
+				geoCache = tc.cacheEntries
+				cacheMux.Unlock()
+			} else {
+				CacheCleanup()
+			}
+			handler := NewAuthHandler(tc.handler)
+			req := httptest.NewRequest("GET", "/", nil)
+			w := httptest.NewRecorder()
+
+			handler.ServeHTTP(w, req)
+			if w.Code != tc.expectedStatus {
+				t.Errorf("Expected status %d, got %d", tc.expectedStatus, w.Code)
+			}
+			if !strings.Contains(w.Body.String(), tc.expectedBody) {
+				t.Errorf("Expected body to contain '%s', got: %s", tc.expectedBody, w.Body.String())
+			}
+			if tc.expectedCountry != "" {
+				country := w.Header().Get("X-Country")
+				if country != tc.expectedCountry {
+					t.Errorf("Expected country '%s', got '%s'", tc.expectedCountry, country)
+				}
+			}
+		})
 	}
-	if !strings.Contains(w.Body.String(), "GeoIP lookup failed") {
-		t.Errorf("Expected 'GeoIP lookup failed' message, got: %s", w.Body.String())
-	}
+
 }
 
 func TestServeHTTP_AllowedCountry(t *testing.T) {
@@ -228,44 +222,6 @@ func TestServeHTTP_AllowedCountry(t *testing.T) {
 		t.Errorf("Expected status 297, got %d", w.Code)
 	}
 	if !strings.Contains(w.Body.String(), "allowed") {
-		t.Errorf("Expected 'allowed' in response body, got: %s", w.Body.String())
-	}
-}
-
-func TestServeHTTP_DisallowedCountry(t *testing.T) {
-	defer resetGlobals()
-	ip := net.ParseIP("8.8.8.8")
-	handler := NewAuthHandler(&mockGeoIPSource{
-		ready: true,
-		lookup: func(ip net.IP, record any) error {
-			rec := record.(*geoRecord)
-			rec.Country.ISOCode = "ru"
-			return nil
-		},
-	})
-	getIPFromRequest = func(r *http.Request) net.IP { return ip }
-	isExcluded = func(ip net.IP, excluded []*net.IPNet) bool { return false }
-
-	called := false
-	serveVerdict = func(w http.ResponseWriter, allowed bool, country string) {
-		called = true
-		if allowed || country != "RU" {
-			t.Errorf("Expected allowed=false, country='RU', got allowed=%v, country='%s'", allowed, country)
-		}
-		w.WriteHeader(296)
-		w.Write([]byte("denied"))
-	}
-
-	req := httptest.NewRequest("GET", "/", nil)
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-	if !called {
-		t.Error("serveVerdict should have been called for disallowed country")
-	}
-	if w.Code != 296 {
-		t.Errorf("Expected status 296, got %d", w.Code)
-	}
-	if !strings.Contains(w.Body.String(), "denied") {
 		t.Errorf("Expected 'allowed' in response body, got: %s", w.Body.String())
 	}
 }
