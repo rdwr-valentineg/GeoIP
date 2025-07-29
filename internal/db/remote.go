@@ -131,7 +131,7 @@ func (r *RemoteFetcher) fetch() error {
 	// Download and extract database
 	data, size, err := r.downloadAndExtractDB()
 	if err != nil {
-		fmt.Printf("Failed to download and extract DB: %v\n", err)
+		log.Error().Err(err).Msg("Failed to download and extract DB")
 		metrics.FetchErrorsTotal.WithLabelValues("download_and_extract").Inc()
 		return err
 	}
@@ -139,25 +139,28 @@ func (r *RemoteFetcher) fetch() error {
 	// Validate size
 	if size > maxDBSize {
 		metrics.FetchErrorsTotal.WithLabelValues("size_validation").Inc()
-		fmt.Printf("Failed to download and extract DB max size exceeded: %d bytes\n", size)
-		return fmt.Errorf("database too large: %d bytes", size)
+		err = fmt.Errorf("database too large: %d bytes", size)
+		log.Error().Err(err).Msg("Failed to download and extract DB max size exceeded")
+		return err
 	}
 
 	// Create reader from data
 	reader, err := r.createReader(data, size)
 	if err != nil {
 		metrics.FetchErrorsTotal.WithLabelValues("reader_creation").Inc()
-		fmt.Printf("Failed to create reader: %v\n", err)
+		log.Error().Err(err).Msg("Failed to create reader")
 		return err
 	}
 
 	// Update the fetcher state
 	if err := r.updateReaderState(reader, size); err != nil {
 		metrics.FetchErrorsTotal.WithLabelValues("reader_state_update").Inc()
-		fmt.Printf("Failed to update reader state: %v\n", err)
+		log.Error().Err(err).Msg("Failed to update reader state")
 		return err
 	}
-	fmt.Printf("Database fetch completed successfully, size: %d bytes\n", size)
+	log.Info().
+		Int64("size_bytes", size).
+		Msg("Database fetch completed successfully")
 	return nil
 }
 
@@ -275,9 +278,7 @@ func (r *RemoteFetcher) updateReaderState(reader ReaderInterface, size int64) er
 
 	// Close previous reader
 	if r.reader != nil {
-		fmt.Println("Closing previous reader")
 		if err := r.reader.Close(); err != nil {
-			fmt.Printf("Failed to close previous reader: %v\n", err)
 			log.Error().Err(err).Msg("failed to close previous reader")
 		}
 	}

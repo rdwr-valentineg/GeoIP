@@ -53,12 +53,10 @@ type (
 		lookup func(ip net.IP, record any) error
 		close  func() error
 	}
-	badReader struct {
-		io.Reader
-	}
+	badReader struct{}
 )
 
-func (_ *badReader) Read(_ []byte) (int, error) {
+func (b *badReader) Read(_ []byte) (int, error) {
 	return 0, fmt.Errorf("bad reader")
 }
 func (m mockGeoIPReader) Lookup(ip net.IP, record any) error {
@@ -219,64 +217,82 @@ func TestRemoteFetcher_LoadsToMemory(t *testing.T) {
 }
 
 // Test individual fetch method components
-func TestRemoteFetcher_downloadArchive_Success(t *testing.T) {
+func TestRemoteFetcher_downloadArchive(t *testing.T) {
 	archive := newValidMMDBArchive(t)
-	server := newTestServer(testResponse{
-		statusCode: http.StatusOK,
-		body:       archive,
-	})
-	origURL := maxmindBaseURL
-	defer func() {
-		maxmindBaseURL = origURL
-		server.close()
-	}()
-
-	rf := newTestRemoteFetcher(server.client, true, "")
-	rf.URL = server.server.URL
-
-	resp, err := rf.downloadArchive()
-	if err != nil {
-		t.Fatalf("downloadArchive failed: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("expected status 200, got %d", resp.StatusCode)
-	}
-}
-
-func TestRemoteFetcher_downloadArchive_BadStatus(t *testing.T) {
-	server := newTestServer(testResponse{
-		statusCode: http.StatusForbidden,
-		body:       []byte("forbidden"),
-	})
-	origURL := maxmindBaseURL
-	defer func() {
-		maxmindBaseURL = origURL
-		server.close()
-	}()
-
-	rf := newTestRemoteFetcher(server.client, true, "")
-	rf.URL = server.server.URL
-
-	_, err := rf.downloadArchive()
-	if err == nil {
-		t.Fatal("expected error for bad status")
-	}
-	if !strings.Contains(err.Error(), "bad response") {
-		t.Errorf("expected 'bad response' error, got %v", err)
-	}
-}
-
-func TestRemoteFetcher_downloadArchive_error(t *testing.T) {
-	r := &RemoteFetcher{
-		Client: &mockClient{
-			err: fmt.Errorf("simulated error"),
+	tests := []struct {
+		name        string
+		server      *testServer
+		expectedErr string
+		rf          *RemoteFetcher
+	}{
+		{
+			name: "Success",
+			server: newTestServer(testResponse{
+				statusCode: http.StatusOK,
+				body:       archive,
+			}),
+		}, {
+			name: "Forbidden response",
+			server: newTestServer(testResponse{
+				statusCode: http.StatusForbidden,
+				body:       []byte("forbidden"),
+			}),
+			expectedErr: "bad response: 403 Forbidden",
+		}, {
+			name: "Client Error",
+			server: newTestServer(testResponse{
+				statusCode: http.StatusInternalServerError,
+				body:       []byte("internal server error"),
+			}),
+			rf: &RemoteFetcher{
+				Client: &mockClient{
+					err: fmt.Errorf("simulated error"),
+				},
+			},
+			expectedErr: "failed to fetch data: simulated error",
+		}, {
+			name: "URL parse error",
+			server: newTestServer(testResponse{
+				statusCode: http.StatusOK,
+				body:       archive,
+			}),
+			rf: &RemoteFetcher{
+				Client: &mockClient{},
+				URL:    "http://some-bad-url\n/path", // This will cause an error in NewRequestWithContext
+			},
+			expectedErr: "failed to create request: parse",
 		},
 	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				tc.server.close()
+			}()
+			if tc.rf == nil {
+				tc.rf = newTestRemoteFetcher(tc.server.client, true, "")
+			}
+			if tc.rf.URL == maxmindBaseURL {
+				tc.rf.URL = tc.server.server.URL
+			} else {
+				fmt.Printf("Using URL: %s", tc.rf.URL) // Log the URL for debugging
+			}
 
-	if _, err := r.downloadArchive(); err == nil {
-		t.Fatal("expected error for simulated client failure")
+			resp, err := tc.rf.downloadArchive()
+			if tc.expectedErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.expectedErr) {
+					t.Fatalf("downloadArchive expected err: %s, got: %v", tc.expectedErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("downloadArchive failed: %v", err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusOK {
+				t.Errorf("expected status 200, got %d", resp.StatusCode)
+			}
+		})
 	}
 }
 
@@ -328,24 +344,27 @@ func TestRemoteFetcher_createInMemoryReader(t *testing.T) {
 		}, {
 			name:        "broken reader",
 			reader:      &badReader{},
-			expectedErr: "invalid MaxMind DB file",
+			expectedErr: "failed to read data into buffer",
+			size:        10,
 		},
 	}
 	for _, tc := range tests {
-		reader, err := rf.createInMemoryReader(tc.reader, tc.size)
-		if tc.expectedErr != "" {
-			if err == nil || !strings.Contains(err.Error(), tc.expectedErr) {
-				t.Fatalf("createInMemoryReader expected err: %s, got: %v", tc.expectedErr, err)
+		t.Run(tc.name, func(t *testing.T) {
+			reader, err := rf.createInMemoryReader(tc.reader, tc.size)
+			if tc.expectedErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.expectedErr) {
+					t.Fatalf("createInMemoryReader expected err: %s, got: %v", tc.expectedErr, err)
+				}
+				return
 			}
-			return
-		}
-		if err != nil {
-			t.Fatalf("createInMemoryReader failed: %v", err)
-		}
-		defer reader.Close()
-		if reader == nil {
-			t.Error("expected non-nil reader")
-		}
+			if err != nil {
+				t.Fatalf("createInMemoryReader failed: %v", err)
+			}
+			defer reader.Close()
+			if reader == nil {
+				t.Error("expected non-nil reader")
+			}
+		})
 	}
 }
 
