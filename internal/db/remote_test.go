@@ -6,7 +6,6 @@ import (
 	"compress/gzip"
 	"context"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"net/http"
@@ -53,12 +52,8 @@ type (
 		lookup func(ip net.IP, record any) error
 		close  func() error
 	}
-	badReader struct{}
 )
 
-func (b *badReader) Read(_ []byte) (int, error) {
-	return 0, fmt.Errorf("bad reader")
-}
 func (m mockGeoIPReader) Lookup(ip net.IP, record any) error {
 	return m.lookup(ip, record)
 }
@@ -322,28 +317,23 @@ func TestRemoteFetcher_createInMemoryReader(t *testing.T) {
 	rf := newTestRemoteFetcher(nil, true, "")
 	tests := []struct {
 		name        string
-		reader      io.Reader
+		db          []byte
 		expectedErr string
 		size        int64
 	}{
 		{
-			name:   "Valid MMDB",
-			reader: bytes.NewReader(mockDB),
-			size:   int64(len(mockDB)),
+			name: "Valid MMDB",
+			db:   mockDB,
+			size: int64(len(mockDB)),
 		}, {
 			name:        "Invalid Reader",
-			reader:      strings.NewReader("invalid mmdb"),
+			db:          []byte("invalid mmdb"),
 			expectedErr: "invalid MaxMind DB file",
-		}, {
-			name:        "broken reader",
-			reader:      &badReader{},
-			expectedErr: "failed to read data into buffer",
-			size:        10,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			reader, err := rf.createInMemoryReader(tc.reader, tc.size)
+			reader, err := rf.createInMemoryReader(tc.db)
 			if tc.expectedErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.expectedErr) {
 					t.Fatalf("createInMemoryReader expected err: %s, got: %v", tc.expectedErr, err)
@@ -376,7 +366,7 @@ func TestRemoteFetcher_createFileReader_Success(t *testing.T) {
 	dbPath := filepath.Join(tempDir, "test.mmdb")
 	rf := newTestRemoteFetcher(nil, false, dbPath)
 
-	reader, err := rf.createFileReader(bytes.NewReader(mockDB), int64(len(mockDB)))
+	reader, err := rf.createFileReader(mockDB, int64(len(mockDB)))
 	if err != nil {
 		// On Windows, we might get file locking issues, so just check the error type
 		if strings.Contains(err.Error(), "process cannot access the file") {

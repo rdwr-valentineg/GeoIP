@@ -2,6 +2,7 @@ package db
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/base64"
@@ -9,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -174,17 +176,13 @@ func (r *RemoteFetcher) fetch() error {
 	return nil
 }
 
-func (r *RemoteFetcher) downloadAndExtractDB(ctx context.Context) (io.Reader, int64, error) {
-	// Download archive
+func (r *RemoteFetcher) downloadAndExtractDB(ctx context.Context) ([]byte, int64, error) {
 	resp, err := r.downloadArchive(ctx)
 	if err != nil {
 		return nil, 0, err
 	}
-	defer func() {
-		resp.Body.Close()
-	}()
+	defer resp.Body.Close()
 
-	// Extract database from archive
 	gzr, err := gzip.NewReader(resp.Body)
 	if err != nil {
 		metrics.FetchErrorsTotal.WithLabelValues("gzip_decompression").Inc()
@@ -199,11 +197,17 @@ func (r *RemoteFetcher) downloadAndExtractDB(ctx context.Context) (io.Reader, in
 		return nil, 0, errors.Wrap(err, "failed to extract GeoLite2-Country.mmdb from tar")
 	}
 
+	// Buffer the data in memory before closing resp.Body
+	buf := new(bytes.Buffer)
+	if _, err := io.Copy(buf, data); err != nil {
+		return nil, 0, errors.Wrap(err, "failed to buffer mmdb data")
+	}
+
 	log.Debug().
 		Str("endpoint", "maxmind").
 		Int64("size_bytes", size).
 		Msg("Database extraction completed successfully")
-	return data, size, nil
+	return buf.Bytes(), int64(buf.Len()), nil
 }
 
 func (r *RemoteFetcher) downloadArchive(ctx context.Context) (*http.Response, error) {
@@ -233,22 +237,15 @@ func (r *RemoteFetcher) downloadArchive(ctx context.Context) (*http.Response, er
 	return resp, nil
 }
 
-func (r *RemoteFetcher) createReader(data io.Reader, size int64) (ReaderInterface, error) {
+func (r *RemoteFetcher) createReader(data []byte, size int64) (ReaderInterface, error) {
 	if r.inMemory {
-		return r.createInMemoryReader(data, size)
+		return r.createInMemoryReader(data)
 	}
 	return r.createFileReader(data, size)
 }
 
-func (r *RemoteFetcher) createInMemoryReader(data io.Reader, size int64) (ReaderInterface, error) {
-	buf := make([]byte, size)
-	_, err := io.ReadFull(data, buf)
-	if err != nil {
-		metrics.FetchErrorsTotal.WithLabelValues("memory_read").Inc()
-		return nil, errors.Wrap(err, "failed to read data into buffer")
-	}
-
-	reader, err := maxminddb.FromBytes(buf)
+func (r *RemoteFetcher) createInMemoryReader(data []byte) (ReaderInterface, error) {
+	reader, err := maxminddb.FromBytes(data)
 	if err != nil {
 		metrics.FetchErrorsTotal.WithLabelValues("maxmind_reader_creation").Inc()
 		return nil, errors.Wrap(err, "failed to create maxmind reader from bytes")
@@ -256,12 +253,11 @@ func (r *RemoteFetcher) createInMemoryReader(data io.Reader, size int64) (Reader
 
 	log.Debug().
 		Str("endpoint", "maxmind").
-		Int64("size_bytes", size).
 		Msg("Database in memory reader created successfully")
 	return reader, nil
 }
 
-func (r *RemoteFetcher) createFileReader(data io.Reader, size int64) (ReaderInterface, error) {
+func (r *RemoteFetcher) createFileReader(data []byte, size int64) (ReaderInterface, error) {
 	// Write to temporary file
 	out, tmpPath, err := utils.CreateTempFile(r.DBPath)
 	if err != nil {
@@ -270,7 +266,7 @@ func (r *RemoteFetcher) createFileReader(data io.Reader, size int64) (ReaderInte
 	}
 	defer out.Close()
 
-	if _, err := io.CopyN(out, data, size); err != nil {
+	if _, err := io.CopyN(out, bytes.NewReader(data), size); err != nil {
 		metrics.FetchErrorsTotal.WithLabelValues("file_write").Inc()
 		return nil, errors.Wrap(err, "failed to copy data to temporary file")
 	}
@@ -285,6 +281,7 @@ func (r *RemoteFetcher) createFileReader(data io.Reader, size int64) (ReaderInte
 	// Atomically replace the database file
 	if err := utils.AtomicReplaceFile(tmpPath, r.DBPath); err != nil {
 		reader.Close()
+		os.Remove(tmpPath)
 		metrics.FetchErrorsTotal.WithLabelValues("file_rename").Inc()
 		return nil, err
 	}
