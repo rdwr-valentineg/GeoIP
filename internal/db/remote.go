@@ -27,6 +27,7 @@ type (
 		Client      HTTPClient
 		URL         string
 		BaseBackoff time.Duration
+		timeout     time.Duration
 		mutex       sync.RWMutex
 		reader      ReaderInterface
 		ready       bool
@@ -47,12 +48,14 @@ type (
 		LicenseKey string
 		DBPath     string
 		Interval   time.Duration
+		Timeout    time.Duration
 	}
 )
 
-var maxmindBaseURL = "https://download.maxmind.com/geoip/databases/GeoLite2-Country/download?suffix=tar.gz"
-
-const maxDBSize = 500 * 1024 * 1024 // 500MB limit
+const (
+	maxDBSize      = 500 * 1024 * 1024 // 500MB limit
+	maxmindBaseURL = "https://download.maxmind.com/geoip/databases/GeoLite2-Country/download?suffix=tar.gz"
+)
 
 func NewRemoteFetcher(cfg Config) *RemoteFetcher {
 	auth := fmt.Sprintf("%s:%s", cfg.AccountID, cfg.LicenseKey)
@@ -73,6 +76,7 @@ func NewRemoteFetcher(cfg Config) *RemoteFetcher {
 			},
 		},
 		inMemory: dbPath == "",
+		timeout:  cfg.Timeout,
 	}
 }
 
@@ -153,12 +157,12 @@ func (r *RemoteFetcher) fetch() error {
 	}
 
 	// Update the fetcher state
-	if err := r.updateReaderState(reader, size); err != nil {
+	if err := r.updateReaderState(reader); err != nil {
 		metrics.FetchErrorsTotal.WithLabelValues("reader_state_update").Inc()
 		log.Error().Err(err).Msg("Failed to update reader state")
 		return err
 	}
-	log.Info().
+	log.Debug().
 		Int64("size_bytes", size).
 		Msg("Database fetch completed successfully")
 	return nil
@@ -187,11 +191,15 @@ func (r *RemoteFetcher) downloadAndExtractDB() (io.Reader, int64, error) {
 		return nil, 0, errors.Wrap(err, "failed to extract GeoLite2-Country.mmdb from tar")
 	}
 
+	log.Debug().
+		Str("endpoint", "maxmind").
+		Int64("size_bytes", size).
+		Msg("Database extraction completed successfully")
 	return data, size, nil
 }
 
 func (r *RemoteFetcher) downloadArchive() (*http.Response, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, "GET", r.URL, nil)
@@ -213,7 +221,10 @@ func (r *RemoteFetcher) downloadArchive() (*http.Response, error) {
 		metrics.FetchErrorsTotal.WithLabelValues("http_status_error").Inc()
 		return nil, fmt.Errorf("bad response: %s", resp.Status)
 	}
-
+	log.Debug().
+		Str("endpoint", "maxmind").
+		Int64("size_bytes", resp.ContentLength).
+		Msg("database fetch completed successfully")
 	return resp, nil
 }
 
@@ -238,6 +249,10 @@ func (r *RemoteFetcher) createInMemoryReader(data io.Reader, size int64) (Reader
 		return nil, errors.Wrap(err, "failed to create maxmind reader from bytes")
 	}
 
+	log.Debug().
+		Str("endpoint", "maxmind").
+		Int64("size_bytes", size).
+		Msg("Database in memory reader created successfully")
 	return reader, nil
 }
 
@@ -269,10 +284,14 @@ func (r *RemoteFetcher) createFileReader(data io.Reader, size int64) (ReaderInte
 		return nil, err
 	}
 
+	log.Debug().
+		Str("endpoint", "maxmind").
+		Int64("size_bytes", size).
+		Msg("Database file reader created successfully")
 	return reader, nil
 }
 
-func (r *RemoteFetcher) updateReaderState(reader ReaderInterface, size int64) error {
+func (r *RemoteFetcher) updateReaderState(reader ReaderInterface) error {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 
@@ -297,10 +316,9 @@ func (r *RemoteFetcher) updateReaderState(reader ReaderInterface, size int64) er
 	// Track successful fetch
 	metrics.FetchSuccessTotal.Inc()
 
-	log.Info().
+	log.Debug().
 		Str("endpoint", "maxmind").
-		Int64("size_bytes", size).
-		Msg("database fetch completed successfully")
+		Msg("database update completed successfully")
 
 	return nil
 }

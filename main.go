@@ -48,6 +48,7 @@ func main() {
 			LicenseKey: config.GetMaxMindLicenseKey(),
 			DBPath:     config.GetDbPath(),
 			Interval:   config.GetMaxMindFetchInterval(),
+			Timeout:    config.GetFetcherTimeout(),
 		})
 	case config.GetDbPath() != "":
 		log.Debug().Msg("Using MaxMind local fetcher")
