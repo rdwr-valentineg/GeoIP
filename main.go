@@ -44,11 +44,13 @@ func main() {
 	case config.GetMaxMindLicenseKey() != "":
 		log.Debug().Msg("Using MaxMind remote fetcher")
 		source = db.NewRemoteFetcher(db.Config{
-			AccountID:  config.GetMaxMindAccountId(),
-			LicenseKey: config.GetMaxMindLicenseKey(),
-			DBPath:     config.GetDbPath(),
-			Interval:   config.GetMaxMindFetchInterval(),
-			Timeout:    config.GetFetcherTimeout(),
+			AccountID:   config.GetMaxMindAccountId(),
+			LicenseKey:  config.GetMaxMindLicenseKey(),
+			DBPath:      config.GetDbPath(),
+			Interval:    config.GetMaxMindFetchInterval(),
+			Timeout:     config.GetFetcherTimeout(),
+			MaxRetries:  config.GetFetcherMaxRetries(),
+			BaseBackoff: config.GetFetcherBaseBackoff(),
 		})
 	case config.GetDbPath() != "":
 		log.Debug().Msg("Using MaxMind local fetcher")

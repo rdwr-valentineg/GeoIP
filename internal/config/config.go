@@ -20,6 +20,8 @@ type config struct {
 	MaxMindFetchInterval time.Duration
 	FetcherTimeout       time.Duration
 	CachePurgePeriod     time.Duration
+	FetcherBaseBackoff   time.Duration
+	FetcherMaxRetries    int
 	AllowedCodes         map[string]bool
 	ExcludeCIDR          []*net.IPNet
 }
@@ -42,6 +44,9 @@ func InitConfig() error {
 	maxMindFetchInterval := flag.Duration("maxmind-fetch-interval", 24*time.Hour, "Interval for fetching MaxMind GeoIP2 DB updates")
 	cachePurgePeriod := flag.Duration("purge-interval", 2*time.Minute, "Interval for clearing the cache")
 	fetcherTimeout := flag.Duration("fetcher-timeout", 30*time.Second, "Timeout for remote fetcher operations")
+	fetcherMaxRetries := flag.Int("fetcher-max-retries", 3, "Maximum retries for remote fetcher operations")
+	fetcherBaseBackoff := flag.Duration("fetcher-base-backoff", 5*time.Second, "Base backoff duration for remote fetcher retries")
+
 	flag.Parse()
 
 	allowedMap := make(map[string]bool, 0)
@@ -68,6 +73,8 @@ func InitConfig() error {
 		MaxMindAccountId:     *maxMindAccountId,
 		MaxMindFetchInterval: *maxMindFetchInterval,
 		FetcherTimeout:       *fetcherTimeout,
+		FetcherMaxRetries:    *fetcherMaxRetries,
+		FetcherBaseBackoff:   *fetcherBaseBackoff,
 	}
 
 	log.Debug().Any("config", cfg).Msg("Configuration initialized")
@@ -164,6 +171,19 @@ func GetCachePurgePeriod() time.Duration {
 func GetFetcherTimeout() time.Duration {
 	if cfg != nil {
 		return cfg.FetcherTimeout
+	}
+	return time.Duration(0)
+}
+
+func GetFetcherMaxRetries() int {
+	if cfg != nil {
+		return cfg.FetcherMaxRetries
+	}
+	return 0
+}
+func GetFetcherBaseBackoff() time.Duration {
+	if cfg != nil {
+		return cfg.FetcherBaseBackoff
 	}
 	return time.Duration(0)
 }

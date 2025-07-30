@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -115,13 +116,14 @@ func newValidMMDBArchive(t *testing.T) []byte {
 
 func newTestRemoteFetcher(client HTTPClient, inMemory bool, dbPath string) *RemoteFetcher {
 	return &RemoteFetcher{
-		BasicAuth: "Basic test-auth",
-		DBPath:    dbPath,
-		Interval:  time.Hour,
-		Client:    client,
-		URL:       maxmindBaseURL, // Use the global test URL
-		inMemory:  inMemory,
-		timeout:   30 * time.Second,
+		BasicAuth:  "Basic test-auth",
+		DBPath:     dbPath,
+		Interval:   time.Hour,
+		Client:     client,
+		URL:        maxmindBaseURL, // Use the global test URL
+		inMemory:   inMemory,
+		timeout:    30 * time.Second,
+		maxRetries: 3,
 	}
 }
 
@@ -270,7 +272,7 @@ func TestRemoteFetcher_downloadArchive(t *testing.T) {
 				tc.rf.URL = tc.server.server.URL
 			}
 
-			resp, err := tc.rf.downloadArchive()
+			resp, err := tc.rf.downloadArchive(context.Background())
 			if tc.expectedErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.expectedErr) {
 					t.Fatalf("downloadArchive expected err: %s, got: %v", tc.expectedErr, err)
@@ -280,7 +282,9 @@ func TestRemoteFetcher_downloadArchive(t *testing.T) {
 			if err != nil {
 				t.Fatalf("downloadArchive failed: %v", err)
 			}
-			defer resp.Body.Close()
+			defer func() {
+				resp.Body.Close()
+			}()
 
 			if resp.StatusCode != http.StatusOK {
 				t.Errorf("expected status 200, got %d", resp.StatusCode)
@@ -300,7 +304,7 @@ func TestRemoteFetcher_downloadAndExtractDB_Success(t *testing.T) {
 	rf := newTestRemoteFetcher(server.client, true, "")
 	rf.URL = server.server.URL
 
-	data, size, err := rf.downloadAndExtractDB()
+	data, size, err := rf.downloadAndExtractDB(context.Background())
 	if err != nil {
 		t.Fatalf("downloadAndExtractDB failed: %v", err)
 	}

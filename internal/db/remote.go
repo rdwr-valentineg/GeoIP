@@ -33,6 +33,7 @@ type (
 		ready       bool
 		done        chan struct{}
 		inMemory    bool
+		maxRetries  int
 	}
 
 	HTTPClient interface {
@@ -44,11 +45,13 @@ type (
 		Rename(oldpath, newpath string) error
 	}
 	Config struct {
-		AccountID  string
-		LicenseKey string
-		DBPath     string
-		Interval   time.Duration
-		Timeout    time.Duration
+		AccountID   string
+		LicenseKey  string
+		DBPath      string
+		Interval    time.Duration
+		Timeout     time.Duration
+		MaxRetries  int
+		BaseBackoff time.Duration
 	}
 )
 
@@ -75,8 +78,9 @@ func NewRemoteFetcher(cfg Config) *RemoteFetcher {
 				IdleConnTimeout:     30 * time.Second,
 			},
 		},
-		inMemory: dbPath == "",
-		timeout:  cfg.Timeout,
+		inMemory:   dbPath == "",
+		timeout:    cfg.Timeout,
+		maxRetries: cfg.MaxRetries,
 	}
 }
 
@@ -131,9 +135,11 @@ func (r *RemoteFetcher) periodicFetch() {
 func (r *RemoteFetcher) fetch() error {
 	// Track fetch attempt
 	metrics.FetchAttemptsTotal.WithLabelValues("maxmind").Inc()
+	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
+	defer cancel()
 
 	// Download and extract database
-	data, size, err := r.downloadAndExtractDB()
+	data, size, err := r.downloadAndExtractDB(ctx)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to download and extract DB")
 		metrics.FetchErrorsTotal.WithLabelValues("download_and_extract").Inc()
@@ -168,13 +174,15 @@ func (r *RemoteFetcher) fetch() error {
 	return nil
 }
 
-func (r *RemoteFetcher) downloadAndExtractDB() (io.Reader, int64, error) {
+func (r *RemoteFetcher) downloadAndExtractDB(ctx context.Context) (io.Reader, int64, error) {
 	// Download archive
-	resp, err := r.downloadArchive()
+	resp, err := r.downloadArchive(ctx)
 	if err != nil {
 		return nil, 0, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		resp.Body.Close()
+	}()
 
 	// Extract database from archive
 	gzr, err := gzip.NewReader(resp.Body)
@@ -198,10 +206,7 @@ func (r *RemoteFetcher) downloadAndExtractDB() (io.Reader, int64, error) {
 	return data, size, nil
 }
 
-func (r *RemoteFetcher) downloadArchive() (*http.Response, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
-	defer cancel()
-
+func (r *RemoteFetcher) downloadArchive(ctx context.Context) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", r.URL, nil)
 	if err != nil {
 		metrics.FetchErrorsTotal.WithLabelValues("http_request_creation").Inc()
@@ -324,12 +329,13 @@ func (r *RemoteFetcher) updateReaderState(reader ReaderInterface) error {
 }
 
 func (r *RemoteFetcher) fetchWithRetry() error {
-	maxRetries := 3
 	var err error
-	for i := range maxRetries {
+	for i := range r.maxRetries {
 		if err = r.fetch(); err != nil {
 			log.Error().
 				Err(err).
+				Int("retry", i+1).
+				Str("endpoint", "maxmind").
 				Msg("database fetch failed")
 			time.Sleep(r.BaseBackoff * time.Duration(i+1))
 			continue
