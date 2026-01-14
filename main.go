@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"sync"
@@ -35,11 +34,6 @@ var (
 	allowedCountries = map[string]bool{}
 )
 
-func respondAllowed(w http.ResponseWriter, isoCode string) {
-	w.Header().Set("X-Country", isoCode)
-	w.WriteHeader(http.StatusOK)
-}
-
 func clearCachePeriodically(interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	go func() {
@@ -49,7 +43,7 @@ func clearCachePeriodically(interval time.Duration) {
 			geoCache = make(map[string]cacheEntry)
 			cacheMux.Unlock()
 			metrics.CacheEvictions.Add(float64(evicted))
-			log.Info().Int("evicted entries", evicted).Msg("Cache cleared")
+			log.Debug().Int("evicted entries", evicted).Msg("Cache cleared")
 		}
 	}()
 }
