@@ -38,6 +38,14 @@ func NewAuthHandler(db db.GeoIPSource) *AuthHandler {
 	}
 }
 
+func CacheCleanup() int {
+	cacheMux.Lock()
+	evicted := len(geoCache)
+	geoCache = make(map[string]cacheEntry)
+	cacheMux.Unlock()
+	return evicted
+}
+
 func (ah *AuthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	log.Debug().Bool("ready", ah.Db.IsReady()).Msg("new auth request")
 	if !ah.Db.IsReady() {

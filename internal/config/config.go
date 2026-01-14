@@ -18,7 +18,10 @@ type config struct {
 	MaxMindLicenseKey    string
 	MaxMindAccountId     string
 	MaxMindFetchInterval time.Duration
+	FetcherTimeout       time.Duration
 	CachePurgePeriod     time.Duration
+	FetcherBaseBackoff   time.Duration
+	FetcherMaxRetries    int
 	AllowedCodes         map[string]bool
 	ExcludeCIDR          []*net.IPNet
 }
@@ -40,6 +43,9 @@ func InitConfig() error {
 	maxMindAccountId := flag.String("maxmind-account-id", "", "MaxMind account id for GeoIP2 DB updates")
 	maxMindFetchInterval := flag.Duration("maxmind-fetch-interval", 24*time.Hour, "Interval for fetching MaxMind GeoIP2 DB updates")
 	cachePurgePeriod := flag.Duration("purge-interval", 2*time.Minute, "Interval for clearing the cache")
+	fetcherTimeout := flag.Duration("fetcher-timeout", 30*time.Second, "Timeout for remote fetcher operations")
+	fetcherMaxRetries := flag.Int("fetcher-max-retries", 3, "Maximum retries for remote fetcher operations")
+	fetcherBaseBackoff := flag.Duration("fetcher-base-backoff", 5*time.Second, "Base backoff duration for remote fetcher retries")
 
 	flag.Parse()
 
@@ -66,6 +72,9 @@ func InitConfig() error {
 		MaxMindLicenseKey:    *maxMindLicenseKey,
 		MaxMindAccountId:     *maxMindAccountId,
 		MaxMindFetchInterval: *maxMindFetchInterval,
+		FetcherTimeout:       *fetcherTimeout,
+		FetcherMaxRetries:    *fetcherMaxRetries,
+		FetcherBaseBackoff:   *fetcherBaseBackoff,
 	}
 
 	log.Debug().Any("config", cfg).Msg("Configuration initialized")
@@ -87,12 +96,17 @@ func (c *config) Validate() error {
 		return errors.New("cache purge interval must be greater than zero")
 	}
 
-	if c.MaxMindLicenseKey != "" && c.MaxMindAccountId == "" {
-		return errors.New("when maxmind license key provided, maxmind account id is required")
-	}
+	if c.MaxMindLicenseKey != "" {
+		if c.MaxMindAccountId == "" {
+			return errors.New("when maxmind license key provided, maxmind account id is required")
+		}
 
-	if c.MaxMindLicenseKey != "" && c.MaxMindFetchInterval <= 0 {
-		return errors.New("maxmind fetch interval must be greater than zero")
+		if c.MaxMindFetchInterval <= 0 {
+			return errors.New("maxmind fetch interval must be greater than zero")
+		}
+		if c.FetcherTimeout <= 0 {
+			return errors.New("fetch timeout must be greater than zero")
+		}
 	}
 
 	return nil
@@ -150,6 +164,26 @@ func GetMaxMindFetchInterval() time.Duration {
 func GetCachePurgePeriod() time.Duration {
 	if cfg != nil {
 		return cfg.CachePurgePeriod
+	}
+	return time.Duration(0)
+}
+
+func GetFetcherTimeout() time.Duration {
+	if cfg != nil {
+		return cfg.FetcherTimeout
+	}
+	return time.Duration(0)
+}
+
+func GetFetcherMaxRetries() int {
+	if cfg != nil {
+		return cfg.FetcherMaxRetries
+	}
+	return 0
+}
+func GetFetcherBaseBackoff() time.Duration {
+	if cfg != nil {
+		return cfg.FetcherBaseBackoff
 	}
 	return time.Duration(0)
 }

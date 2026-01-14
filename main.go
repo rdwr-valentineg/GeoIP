@@ -2,10 +2,8 @@ package main
 
 import (
 	"context"
-	"net"
 	"os"
 	"os/signal"
-	"sync"
 	"syscall"
 	"time"
 
@@ -17,31 +15,16 @@ import (
 )
 
 type (
-	cacheEntry struct {
-		allowed bool
-		country string
-	}
 	AuthResponse struct {
 		Message string `json:"message,omitempty"`
 	}
-)
-
-var (
-	geoCache = make(map[string]cacheEntry)
-	cacheMux = sync.RWMutex{}
-
-	excludeSubnets   []*net.IPNet
-	allowedCountries = map[string]bool{}
 )
 
 func clearCachePeriodically(interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	go func() {
 		for range ticker.C {
-			cacheMux.Lock()
-			evicted := len(geoCache)
-			geoCache = make(map[string]cacheEntry)
-			cacheMux.Unlock()
+			evicted := webserver.CacheCleanup()
 			metrics.CacheEvictions.Add(float64(evicted))
 			log.Debug().Int("evicted entries", evicted).Msg("Cache cleared")
 		}
@@ -60,7 +43,15 @@ func main() {
 	switch {
 	case config.GetMaxMindLicenseKey() != "":
 		log.Debug().Msg("Using MaxMind remote fetcher")
-		source = db.NewRemoteFetcher()
+		source = db.NewRemoteFetcher(db.Config{
+			AccountID:   config.GetMaxMindAccountId(),
+			LicenseKey:  config.GetMaxMindLicenseKey(),
+			DBPath:      config.GetDbPath(),
+			Interval:    config.GetMaxMindFetchInterval(),
+			Timeout:     config.GetFetcherTimeout(),
+			MaxRetries:  config.GetFetcherMaxRetries(),
+			BaseBackoff: config.GetFetcherBaseBackoff(),
+		})
 	case config.GetDbPath() != "":
 		log.Debug().Msg("Using MaxMind local fetcher")
 		source = db.NewDiskLoader(config.GetDbPath())
@@ -77,16 +68,24 @@ func main() {
 
 	metrics.InitMetrics()
 	clearCachePeriodically(config.GetCachePurgePeriod())
-	s, err := webserver.Run(source)
+	errCh := make(chan error, 1)
+	s := webserver.Run(source, errCh)
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to start web server")
 	}
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
-	<-quit
-
-	log.Info().Msg("Shutting down server...")
+	select {
+	case <-quit:
+		log.Info().Msg("Shutting down server...")
+	case err := <-errCh:
+		if err != nil {
+			log.Error().Err(err).Msg("Server error")
+			return
+		}
+		log.Error().Err(err).Msg("Server error")
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

@@ -34,4 +34,27 @@ func TestDiskLoader_LoadsAndReloads(t *testing.T) {
 	if err := loader.Reload(); err != nil {
 		t.Fatalf("should have passed, failed to reload: %v", err)
 	}
+	if err := loader.Stop(); err != nil {
+		t.Fatalf("should have passed, failed to stop loader: %v", err)
+	}
+}
+
+func TestStopWithNoReader(t *testing.T) {
+	loader := NewDiskLoader("nonexistent.mmdb")
+	if err := loader.Stop(); err != nil {
+		t.Fatalf("should have passed, failed to stop loader with no reader: %v", err)
+	}
+	if ready := loader.IsReady(); ready {
+		t.Fatalf("loader should not be ready after stop with no reader, got: %v", ready)
+	}
+}
+
+func TestReloadWithInvalidPath(t *testing.T) {
+	loader := NewDiskLoader("invalid-path.mmdb")
+	if err := loader.Reload(); err == nil {
+		t.Fatalf("should have failed, expected error when reloading with invalid path, got nil")
+	}
+	if ready := loader.IsReady(); ready {
+		t.Fatalf("loader should not be ready after reload with invalid path, got: %v", ready)
+	}
 }
