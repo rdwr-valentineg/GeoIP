@@ -26,7 +26,7 @@ func clearCachePeriodically(interval time.Duration) {
 		for range ticker.C {
 			evicted := webserver.CacheCleanup()
 			metrics.CacheEvictions.Add(float64(evicted))
-			log.Info().Int("evicted entries", evicted).Msg("Cache cleared")
+			log.Debug().Int("evicted entries", evicted).Msg("Cache cleared")
 		}
 	}()
 }
